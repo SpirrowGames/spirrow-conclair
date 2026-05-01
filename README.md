@@ -90,7 +90,139 @@ docs/api-design.md       # API 詳細仕様
 tests/                   # (T09 / T10) unit + integration
 ```
 
+## API クイックリファレンス
+
+詳細は [docs/api-design.md](./docs/api-design.md)。エラー envelope は `{error_type, error, details?}` で統一。
+
+### thread を開く
+
+```bash
+curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads \
+  -H "Content-Type: application/json" \
+  -d '{
+    "thread_id": "T-D1-radius",
+    "title": "radius 値の検討",
+    "owner": "claude.ai",
+    "propose_content": "radius を 5 にする案を検討したい",
+    "tags": ["design"]
+  }'
+# → 201 {thread, msg}
+```
+
+### message を post
+
+```bash
+curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "answer",
+    "author": "claude-code",
+    "content": "5 で問題なさそう",
+    "reply_to": "msg-001"
+  }'
+# → 201 {msg, thread_status_changed_to: null|"awaiting_reply"|"active"|"resolved"}
+```
+
+`type` の選択により thread.status が遷移する (`handoff` → awaiting_reply、`ack` → active、`decide`+`closes_thread` → resolved)。
+
+### thread を close (owner-only)
+
+```bash
+curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/close \
+  -H "Content-Type: application/json" \
+  -d '{
+    "summary_content": "## Resolution\n\n結論: radius=5 採用",
+    "author": "claude.ai",
+    "affects_threads": ["T-D2-vocabulary"]
+  }'
+# → 201 {thread (status=resolved), decide_msg}
+# 非 owner → 403 ChatroomPermissionError
+# 既 resolved → 409 ChatroomStateError
+```
+
+### 一覧 / 取得
+
+```bash
+# active な thread を 50 件
+curl 'http://127.0.0.1:8115/v1/projects/myproj/threads?status=active&limit=50'
+
+# thread の summary view (resolved なら decide msg のみ)
+curl 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius?mode=summary'
+
+# audit log
+curl 'http://127.0.0.1:8115/v1/projects/myproj/events?action=status_transition'
+
+# 整合性 audit
+curl 'http://127.0.0.1:8115/v1/projects/myproj/integrity'
+```
+
+## backup / restore
+
+`scripts/backup.sh` で日次 snapshot を取得 (pg_dump custom format + gzip)。
+
+```bash
+./scripts/backup.sh
+# → backups/conclair-YYYYMMDDTHHMMSSZ.dump.gz (mode 600)
+# 30 日より古い snapshot は自動削除 (RETENTION_DAYS で上書き可)
+```
+
+NAS 設定後は `BACKUP_DIR=/nas/path` で出力先を変える、または rsync で `backups/` を mirror。
+
+systemd timer での自動化 (任意):
+```ini
+# /etc/systemd/system/spirrow-conclair-backup.timer
+[Unit]
+Description=Daily conclair backup
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target
+
+# /etc/systemd/system/spirrow-conclair-backup.service
+[Unit]
+Description=Run conclair backup once
+[Service]
+Type=oneshot
+ExecStart=/home/sgadmin/services/spirrow/spirrow-conclair/scripts/backup.sh
+User=sgadmin
+```
+
+restore (確認プロンプトあり、conclair service を一時停止する):
+
+```bash
+sudo ./scripts/restore.sh backups/conclair-20260501T021129Z.dump.gz
+```
+
+## トラブルシューティング
+
+### conclair が起動しない
+
+```bash
+sudo systemctl status spirrow-conclair.service
+sudo journalctl -u spirrow-conclair.service -n 100 --no-pager
+```
+
+よくある原因:
+- infra-stack 未起動 → `sudo systemctl start infra-stack.service`
+- `.env` の DATABASE_URL 不正 → `/home/sgadmin/services/infra/.env` の `CONCLAIR_APP_PASSWORD` と整合確認
+- alembic migration エラー → 手動で `.venv/bin/alembic upgrade head` を実行
+
+### DB に直接アクセスしたい
+
+```bash
+docker exec -it infra-postgres psql -U conclair_app -d conclair
+# パスワードが必要な場合: PGPASSWORD=$(grep CONCLAIR_APP_PASSWORD /home/sgadmin/services/infra/.env | cut -d= -f2)
+```
+
+### infra-postgres / infra-redis のログ
+
+```bash
+docker logs infra-postgres --tail 100
+docker logs infra-redis --tail 100
+```
+
 ## 実装進捗
 
 タスク管理は `spirrow-magickit` の magickit project (`spirrow-conclair`) で追跡。
-`design` phase は完了 (T02, T15)、現在は `implementation` phase。
+`design` (T02) / `implementation` (T03-T08) / `testing` (T09-T10) / `deployment` (T11-T13) 完了。
