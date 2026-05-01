@@ -13,10 +13,13 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Path, Query, status
 from sqlalchemy import BigInteger, cast, func, select
 
+from spirrow_conclair.api.messages import post_message_in_session
 from spirrow_conclair.db import SessionDep
 from spirrow_conclair.exceptions import ChatroomIntegrityError, ChatroomNotFoundError
 from spirrow_conclair.models import ChatroomEvent, Message, Thread
 from spirrow_conclair.schemas import (
+    CloseThreadRequest,
+    CloseThreadResponse,
     Message as MessageSchema,
 )
 from spirrow_conclair.schemas import (
@@ -27,7 +30,9 @@ from spirrow_conclair.schemas import (
     ThreadStatus,
     ThreadView,
 )
+from spirrow_conclair.services import integrity as integrity_svc
 from spirrow_conclair.services.msg_id_allocator import allocate_next_msg_id
+from spirrow_conclair.services.permissions import assert_owner_can_close
 
 router = APIRouter(prefix="/v1/projects/{project}/threads", tags=["threads"])
 
@@ -202,4 +207,53 @@ async def get_thread(
         thread=ThreadSchema.model_validate(thread),
         messages=[MessageSchema.model_validate(m) for m in msg_rows],
         mode=mode,
+    )
+
+
+# --- POST /threads/{thread_id}/close (close_thread shortcut) -------------
+
+
+@router.post(
+    "/{thread_id}/close",
+    status_code=status.HTTP_201_CREATED,
+    response_model=CloseThreadResponse,
+    summary="Close a thread by posting a decide msg (owner-only)",
+)
+async def close_thread(
+    project: ProjectPath,
+    thread_id: ThreadIdPath,
+    body: CloseThreadRequest,
+    session: SessionDep,
+) -> CloseThreadResponse:
+    async with session.begin():
+        thread = await integrity_svc.fetch_thread_or_raise(
+            session, project=project, thread_id=thread_id
+        )
+        # Owner check first so non-owner attempts surface as 403 rather
+        # than as the integrity 409 from assert_closes_thread_rule.
+        assert_owner_can_close(thread, body.author)
+
+        # affects_threads is a thread-level field; patch it before
+        # post_message_in_session so it's persisted in the same txn.
+        if body.affects_threads:
+            thread.affects_threads = list(body.affects_threads)
+
+        msg_orm, _transition = await post_message_in_session(
+            session,
+            project=project,
+            thread=thread,
+            msg_type="decide",
+            author=body.author,
+            content=body.summary_content,
+            references_threads=None,
+            related_tasks=body.related_tasks,
+            closes_thread=thread_id,
+            tags=body.tags,
+            commit_ref=body.commit_ref,
+            timestamp=body.timestamp,
+        )
+
+    return CloseThreadResponse(
+        thread=ThreadSchema.model_validate(thread),
+        decide_msg=MessageSchema.model_validate(msg_orm),
     )
