@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from spirrow_conclair import __version__
-from spirrow_conclair.api import threads_router
+from spirrow_conclair.api import messages_router, threads_router
 from spirrow_conclair.api.error_handlers import register_error_handlers
 from spirrow_conclair.config import Settings, get_settings
 from spirrow_conclair.db import dispose_db, health_check, init_db
@@ -39,6 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_error_handlers(app)
     app.include_router(threads_router)
+    app.include_router(messages_router)
 
     @app.get("/health")
     async def health() -> JSONResponse:
