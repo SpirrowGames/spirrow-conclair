@@ -1,0 +1,38 @@
+[Unit]
+Description=Spirrow Conclair - chatroom persistence backend (FastAPI)
+Documentation=https://github.com/SpirrowGames/spirrow-conclair
+After=infra-stack.service network-online.target
+Requires=infra-stack.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sgadmin
+Group=sgadmin
+WorkingDirectory=/home/sgadmin/services/spirrow/spirrow-conclair
+EnvironmentFile=/home/sgadmin/services/spirrow/spirrow-conclair/.env
+
+# Apply any pending migrations before starting the app. Idempotent.
+ExecStartPre=/home/sgadmin/services/spirrow/spirrow-conclair/.venv/bin/alembic upgrade head
+
+# Bind to loopback only — external access goes through magickit.
+ExecStart=/home/sgadmin/services/spirrow/spirrow-conclair/.venv/bin/uvicorn \
+    spirrow_conclair.main:app \
+    --host 127.0.0.1 \
+    --port 8115 \
+    --no-access-log
+
+MemoryMax=2G
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/sgadmin/services/spirrow/spirrow-conclair
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
