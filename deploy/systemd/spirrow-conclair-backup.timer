@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily timer for spirrow-conclair-backup.service
+Documentation=file:///home/sgadmin/services/spirrow/spirrow-conclair/scripts/backup.sh
+
+[Timer]
+# Fire once a day at 04:30 JST. If the host was off at the scheduled
+# time (Persistent=true), run the catch-up immediately on next boot.
+OnCalendar=*-*-* 04:30:00 Asia/Tokyo
+Persistent=true
+RandomizedDelaySec=5min
+Unit=spirrow-conclair-backup.service
+
+[Install]
+WantedBy=timers.target

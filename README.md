@@ -168,25 +168,29 @@ curl 'http://127.0.0.1:8115/v1/projects/myproj/integrity'
 
 NAS 設定後は `BACKUP_DIR=/nas/path` で出力先を変える、または rsync で `backups/` を mirror。
 
-systemd timer での自動化 (任意):
-```ini
-# /etc/systemd/system/spirrow-conclair-backup.timer
-[Unit]
-Description=Daily conclair backup
-[Timer]
-OnCalendar=daily
-Persistent=true
-[Install]
-WantedBy=timers.target
+systemd timer での自動化 (本 repo の `deploy/systemd/` に同梱):
 
-# /etc/systemd/system/spirrow-conclair-backup.service
-[Unit]
-Description=Run conclair backup once
-[Service]
-Type=oneshot
-ExecStart=/home/sgadmin/services/spirrow/spirrow-conclair/scripts/backup.sh
-User=sgadmin
+```bash
+sudo cp deploy/systemd/spirrow-conclair-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spirrow-conclair-backup.timer
+systemctl list-timers spirrow-conclair-backup.timer
 ```
+
+毎日 04:30 JST に発火、Persistent=true なので host 停止中の sched をキャッチアップ。
+
+### NAS 接続後の rsync 移行
+
+NAS 側の export path (例: `/mnt/nas/backups/spirrow-conclair/`) が用意できたら:
+
+```bash
+# /etc/systemd/system/spirrow-conclair-backup.service の ExecStartPost に追加
+ExecStartPost=/usr/bin/rsync -a --delete /home/sgadmin/services/spirrow/spirrow-conclair/backups/ /mnt/nas/backups/spirrow-conclair/
+
+# あるいは backup.sh 内で BACKUP_DIR=/mnt/nas/... に切替
+```
+
+`--delete` で local の `RETENTION_DAYS=30` で消えた古い snapshot も NAS 側で同期削除。NAS が長期保持なら `--delete` 外して NAS 側の retention は別途管理。
 
 restore (確認プロンプトあり、conclair service を一時停止する):
 

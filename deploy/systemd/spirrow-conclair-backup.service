@@ -1,0 +1,23 @@
+[Unit]
+Description=Daily snapshot of the conclair PostgreSQL database
+Documentation=file:///home/sgadmin/services/spirrow/spirrow-conclair/scripts/backup.sh
+After=infra-stack.service
+Requires=infra-stack.service
+
+[Service]
+Type=oneshot
+User=sgadmin
+Group=sgadmin
+WorkingDirectory=/home/sgadmin/services/spirrow/spirrow-conclair
+
+# backup.sh sources POSTGRES_SUPER_PASSWORD from /home/sgadmin/services/infra/.env
+# itself, so no EnvironmentFile here. The script writes to ./backups
+# (mode 600) and prunes >RETENTION_DAYS=30 day old dumps.
+ExecStart=/home/sgadmin/services/spirrow/spirrow-conclair/scripts/backup.sh
+
+# Hardening — only the backups dir needs write
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/sgadmin/services/spirrow/spirrow-conclair/backups
+ProtectHome=read-only
