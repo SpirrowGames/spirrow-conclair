@@ -106,6 +106,15 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 # http://localhost:8115/ui/
 ```
 
+`-L` の左側 `8115` は **開発 PC で listen する port**、右側 `127.0.0.1:8115` は **server 側から見た conclair の bind address**。開発 PC で 8115 が他のサービスに使われている場合は左側を変える:
+
+```bash
+ssh -L 18115:127.0.0.1:8115 sgadmin@<host>
+# 開発 PC のブラウザで http://localhost:18115/ui/
+```
+
+右側の `127.0.0.1` は server 側 loopback (= conclair が bind しているアドレス) なので変更不要。
+
 ### 機能サマリ
 
 | 画面 | URL | 用途 |

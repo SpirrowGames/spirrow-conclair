@@ -223,6 +223,8 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 # 開発 PC のブラウザで http://localhost:8115/ui/
 ```
 
+左側 (`8115`) は開発 PC の listen port、右側 (`127.0.0.1:8115`) は server 側 loopback。開発 PC 側で 8115 が衝突する場合は `-L 18115:127.0.0.1:8115` のように左側だけ変える。
+
 ## 外部依存
 
 - **infra-stack.service** (postgres + redis) — `Requires=` で接続。停止すれば conclair も停止する
