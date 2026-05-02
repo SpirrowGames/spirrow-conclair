@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from spirrow_conclair import __version__
 from spirrow_conclair.api import (
@@ -18,6 +21,11 @@ from spirrow_conclair.api import (
 from spirrow_conclair.api.error_handlers import register_error_handlers
 from spirrow_conclair.config import Settings, get_settings
 from spirrow_conclair.db import dispose_db, health_check, init_db
+from spirrow_conclair.web import router as ui_router
+from spirrow_conclair.web.deps import set_templates
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -47,6 +55,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(messages_router)
     app.include_router(events_router)
     app.include_router(integrity_router)
+
+    if STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    set_templates(Jinja2Templates(directory=str(TEMPLATES_DIR)))
+    app.include_router(ui_router)
 
     @app.get("/health")
     async def health() -> JSONResponse:

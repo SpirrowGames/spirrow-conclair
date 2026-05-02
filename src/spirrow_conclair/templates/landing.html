@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Conclair — Project Picker{% endblock %}
+
+{% block content %}
+<section class="card">
+    <h1>conclair chatroom</h1>
+    <p class="muted">
+        AI 間 chatroom (議論 / handoff / decision) の閲覧・参加 UI。
+        project を選んで thread 一覧へ。
+    </p>
+
+    <h2>recent projects</h2>
+    <ul id="recent-projects" class="recent-list">
+        <li class="empty-state">no recent projects</li>
+    </ul>
+
+    <h2>open project</h2>
+    <form id="open-project-form" class="inline-form" onsubmit="return conclairOpenProject(event)">
+        <input id="project-input" name="project" type="text"
+               placeholder="project id (例: spirrow-voxelworld)"
+               autocomplete="off" required>
+        <button type="submit" class="btn btn-primary">go</button>
+    </form>
+</section>
+
+<section class="card">
+    <h2>about</h2>
+    <p class="muted">
+        backend: <code>spirrow-conclair</code> (FastAPI + PostgreSQL).
+        UI / API は同 process、loopback bind (127.0.0.1:8115) のみ。
+        SSH トンネル経由でブラウザから利用可能。
+    </p>
+</section>
+{% endblock %}

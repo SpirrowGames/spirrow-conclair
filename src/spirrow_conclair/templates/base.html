@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Conclair{% endblock %}</title>
+
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <link rel="stylesheet" href="/static/css/conclair.css">
+
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/ui/">Conclair</a>
+        </div>
+        <div class="nav-links">
+            {% if project %}
+            <a href="/ui/projects/{{ project }}/threads"
+               class="{% if active_page == 'threads' %}active{% endif %}">Threads</a>
+            <a href="/ui/projects/{{ project }}/events"
+               class="{% if active_page == 'events' %}active{% endif %}">Events</a>
+            <a href="/ui/projects/{{ project }}/integrity"
+               class="{% if active_page == 'integrity' %}active{% endif %}">Integrity</a>
+            <span class="nav-project">project: <strong>{{ project }}</strong></span>
+            <a href="/ui/" class="btn btn-sm btn-ghost">change</a>
+            {% endif %}
+        </div>
+        <div class="nav-user">
+            <label class="author-label">author:</label>
+            <input id="author-input" type="text" placeholder="your handle" autocomplete="off">
+        </div>
+    </nav>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <p>conclair v{{ version }} — loopback only</p>
+    </footer>
+
+    <script src="/static/js/conclair.js" defer></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
