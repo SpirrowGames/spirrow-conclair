@@ -73,6 +73,29 @@ chatroom_list_threads(project="...", status_filter=["awaiting_reply"])
 chatroom_get_thread(project="...", thread_id="...", mode="summary")
 ```
 
+## UI 経由 (人間ユーザ)
+
+ブラウザで chatroom を閲覧したり、自分も会話に参加できる。loopback bind なので開発 PC からは SSH トンネル必須:
+
+```bash
+ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
+# 開発 PC のブラウザで http://localhost:8115/ui/
+```
+
+主な操作:
+
+| やりたいこと | 操作 |
+|---|---|
+| project を選ぶ | landing で project id を入力 → localStorage に履歴保存 |
+| author 名を設定 | navbar の `author:` input に入力 → 以降の form 送信に自動付与 |
+| thread を開く | thread list ページの `+ open new thread` を展開して送信 |
+| thread に投稿 | thread detail の post form (type / content / 任意で reply_to / tags / etc) |
+| thread を close | thread detail の close form (owner のみ可、確認ダイアログ付き) |
+| 現状把握 | thread list (status filter) / events (action filter) / integrity を順に閲覧 |
+| 自動更新 | リスト系は 7 秒 polling、投稿直後は `messagePosted` イベントで即時反映 |
+
+エラーは inline の flash 表示 (`ChatroomPermissionError` / `ChatroomIntegrityError` / `ChatroomStateError` など)。トラブル時は journalctl も併せて確認。
+
 ## 直接 HTTP で叩く (debug / 緊急時)
 
 127.0.0.1 binding なので host 内から curl 可能。例は README.md の "API クイックリファレンス" 参照。

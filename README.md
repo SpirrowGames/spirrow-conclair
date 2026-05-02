@@ -4,18 +4,18 @@ AI 間協調インフラ chatroom の永続化バックエンド。
 
 ## 概要
 
-複数の AI session（Claude.ai / Claude Code / human）が並行して 1 プロジェクトを進める際の議論・申し送り・確認応答を構造化して永続化する。**FastAPI + PostgreSQL** で実装され、`spirrow-magickit` がアダプタ経由で MCP ツールとして公開する。
+複数の AI session（Claude.ai / Claude Code / human）が並行して 1 プロジェクトを進める際の議論・申し送り・確認応答を構造化して永続化する。**FastAPI + PostgreSQL** で実装され、`spirrow-magickit` がアダプタ経由で MCP ツールとして公開する。AI 用の HTTP API (`/v1`) と、人間が直接閲覧・参加する Web UI (`/ui`) の両方を同 process で提供する。
 
 ## アーキテクチャ上の位置
 
 ```
-Claude.ai / Claude Code (consumer)
-        │ MCP
-        ▼
-  spirrow-magickit (:8114)
-        │ httpx
-        ▼
-  spirrow-conclair (:8115)  ← このプロジェクト
+Claude.ai / Claude Code            人間の Browser
+        │ MCP                            │ HTTP (loopback / SSH tunnel)
+        ▼                                ▼
+  spirrow-magickit (:8114)          /ui (Jinja2 + HTMX)
+        │ httpx                          │
+        ▼                                ▼
+  spirrow-conclair (:8115)  ← このプロジェクト (/v1 + /ui 同居)
         │ asyncpg
         ▼
   PostgreSQL (database: conclair, owner: conclair_app)
@@ -77,18 +77,53 @@ curl http://127.0.0.1:8115/health
 ```
 src/spirrow_conclair/
 ├── __init__.py
-├── main.py              # FastAPI app + /health
+├── main.py              # FastAPI app + /health + /static + /ui mount
 ├── config.py            # Pydantic Settings
 ├── db.py                # async engine / session / health_check
 ├── models/              # (T04) SQLAlchemy ORM
 ├── schemas/             # (T04) pydantic request/response
-├── api/                 # (T06+) FastAPI routers
-└── services/            # (T05) status_transition / integrity / msg_id_allocator
+├── api/                 # (T06+) FastAPI routers (/v1 JSON API)
+├── services/            # (T05) status_transition / integrity / msg_id_allocator
+├── web/                 # (T15-T17) /ui routes (Jinja2 + HTMX)
+├── templates/           # (T15-T17) Jinja2 page + partial templates
+└── static/              # (T15-T17) CSS variables theme + tiny JS
 
 alembic/                 # migration
 docs/api-design.md       # API 詳細仕様
-tests/                   # (T09 / T10) unit + integration
+docs/usage-cheatsheet.md # 運用 cheat sheet
+tests/                   # (T09 / T10) unit + integration (54 incl. UI smoke)
 ```
+
+## Web UI (`/ui`)
+
+人間が chatroom を閲覧・参加するための Jinja2 + HTMX 製 UI。conclair 本体と同じ process / 同じ port (`8115`) で動作、loopback bind は維持。
+
+ローカルの開発 PC から見るには SSH トンネル:
+
+```bash
+ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
+# その後、開発 PC のブラウザで:
+# http://localhost:8115/ui/
+```
+
+### 機能サマリ
+
+| 画面 | URL | 用途 |
+|---|---|---|
+| Landing | `/ui/` | 直近の project (localStorage) + project 名入力 |
+| Thread 一覧 | `/ui/projects/{p}/threads` | status / owner filter, pagination, 7 秒 polling |
+| Thread 詳細 | `/ui/projects/{p}/threads/{tid}` | message 一覧 + 投稿 form + close form (owner only) |
+| Events | `/ui/projects/{p}/events` | audit log (action / thread_id / since/until filter) |
+| Integrity | `/ui/projects/{p}/integrity` | 整合性 audit report (常に 200) |
+
+### UX
+
+- **author**: navbar の input に名前を入れると localStorage に保存され、以降の全 form 送信に hidden 値として自動付与される。
+- **HTMX polling**: list / messages / integrity は 7 秒ごとに再 fetch、フィルタ入力中の値は別 element なので吹き飛ばない。
+- **post 直後に即時反映**: `HX-Trigger: messagePosted` で thread detail の messages partial を即時再 fetch。
+- **close**: owner のみ `<form>` から実行、確認ダイアログあり、成功時 `HX-Refresh: true` で full reload。非 owner は inline error。
+
+依存: jinja2, aiofiles, python-multipart (fastapi[standard] 経由で大半は自動)。HTMX 1.9.10 は CDN script tag で取込、bundler 不要。
 
 ## API クイックリファレンス
 
@@ -229,4 +264,11 @@ docker logs infra-redis --tail 100
 ## 実装進捗
 
 タスク管理は `spirrow-magickit` の magickit project (`spirrow-conclair`) で追跡。
-`design` (T02) / `implementation` (T03-T08) / `testing` (T09-T10) / `deployment` (T11-T13) 完了。
+
+- `design` (T02) — OpenAPI / status / error envelope
+- `implementation` (T03-T08) — scaffolding / models / services / api endpoints
+- `testing` (T09-T10) — unit + integration (testcontainers postgres)
+- `deployment` (T11-T14) — infra-stack / systemd / docs / backup timer
+- **UI** (T15-T18) — Jinja2 + HTMX + 素 CSS、`/ui` mount、open / post / close form
+
+154 / 154 tests pass / coverage 78%。

@@ -4,18 +4,22 @@ AI 間協調インフラ chatroom の永続化バックエンド。FastAPI + Pos
 
 ## 役割
 
-複数の AI session (Claude.ai / Claude Code / human) が並行して 1 プロジェクトを進める時の議論・申し送り・確認応答を構造化して保存する。consumer は spirrow-magickit のみ (HTTP REST 経由)。AI session には magickit が MCP ツールとしてラップして公開する。
+複数の AI session (Claude.ai / Claude Code / human) が並行して 1 プロジェクトを進める時の議論・申し送り・確認応答を構造化して保存する。
+
+consumer:
+- **AI session**: spirrow-magickit が MCP ツール (`chatroom_*` 7 個) でラップ → HTTP REST (`/v1`) 経由
+- **人間**: 同 process が `/ui` で配信する Jinja2 + HTMX UI 経由 (loopback bind、SSH トンネルでブラウザから利用)
 
 ## アーキテクチャ
 
 ```
-Claude Code / Claude.ai (consumer)
-        │ MCP (SSE)
-        ▼
-  spirrow-magickit (:8114)
-        │ httpx
-        ▼
-  spirrow-conclair (:8115, 127.0.0.1 only)  ← このプロジェクト
+Claude Code / Claude.ai                 人間の Browser
+        │ MCP (SSE)                          │ HTTP (loopback / SSH tunnel)
+        ▼                                    ▼
+  spirrow-magickit (:8114)                /ui (Jinja2 + HTMX)
+        │ httpx                              │
+        ▼                                    ▼
+  spirrow-conclair (:8115, 127.0.0.1 only)  ← このプロジェクト (/v1 + /ui 同居)
         │ asyncpg
         ▼
   PostgreSQL (database: conclair, owner: conclair_app)
@@ -40,7 +44,7 @@ Claude Code / Claude.ai (consumer)
 ```
 src/spirrow_conclair/
 ├── __init__.py
-├── main.py              # FastAPI app + lifespan + /health
+├── main.py              # FastAPI app + lifespan + /health + /static + /ui
 ├── config.py            # Pydantic Settings (DATABASE_URL / PORT / LOG_LEVEL)
 ├── db.py                # async engine / session factory / get_session dep
 ├── models/              # SQLAlchemy ORM
@@ -58,13 +62,30 @@ src/spirrow_conclair/
 │   ├── integrity.py          # pre-write asserts + audit_project (full report)
 │   ├── permissions.py        # owner check (close 用)
 │   └── msg_id_allocator.py   # advisory_xact_lock + numeric ordering
-├── api/                 # FastAPI routers
+├── api/                 # FastAPI routers (/v1 JSON API)
 │   ├── __init__.py      # router collection
 │   ├── error_handlers.py     # Chatroom* → HTTP code mapping
 │   ├── threads.py            # POST/GET /threads, /close, /threads/{id}
 │   ├── messages.py           # POST /threads/{id}/messages + post_message_in_session
 │   ├── events.py             # GET /events
 │   └── integrity.py          # GET /integrity (audit report)
+├── web/                 # /ui routes (Jinja2 + HTMX, T15-T17)
+│   ├── __init__.py      # ui_router export
+│   ├── routes.py        # page + fragment + form-post endpoints
+│   ├── deps.py          # Jinja2Templates singleton + iso filter
+│   └── forms.py         # parse_csv() helper (CSV → list)
+├── templates/           # Jinja2 templates
+│   ├── base.html        # navbar (author input) + HTMX CDN + footer
+│   ├── landing.html     # recent projects + project picker
+│   ├── thread_list.html # filter form + table + open form
+│   ├── thread_detail.html # messages + post form + close form
+│   ├── events.html      # filter form + audit table
+│   ├── integrity.html   # audit body (auto-poll)
+│   └── partials/        # HTMX swap targets (thread_rows, message_list,
+│                        # event_rows, integrity_body, flash)
+├── static/              # served at /static/
+│   ├── css/conclair.css # CSS variables theme (~270 行)
+│   └── js/conclair.js   # localStorage author / recent projects, hx-vals inject
 └── exceptions.py        # ChatroomError 階層 (NotFound/Integrity/Permission/State/DB)
 
 alembic/                 # migration
@@ -72,17 +93,21 @@ alembic/                 # migration
 └── versions/
     └── 0001_initial.py
 
-docs/api-design.md       # HTTP API 詳細仕様 (T02)
+docs/
+├── api-design.md        # HTTP API 詳細仕様 (T02)
+└── usage-cheatsheet.md  # 運用 cheat sheet (T13)
 deploy/systemd/spirrow-conclair.service
+deploy/systemd/spirrow-conclair-backup.{service,timer}
 scripts/
 ├── backup.sh            # 日次 pg_dump → snapshot
 └── restore.sh           # snapshot から DB 復元
 tests/
 ├── unit/                # 100 cases (services の pure 部分)
-└── integration/         # 30 cases (testcontainers postgres + httpx ASGITransport)
+└── integration/         # 54 cases (testcontainers postgres + httpx ASGITransport)
+                         #   30 v1 API + 24 UI smoke
 ```
 
-## API レイヤ
+## API レイヤ (`/v1` JSON)
 
 すべての write 系 endpoint は **1 transaction** 内で完結する (msg INSERT + thread UPDATE + chatroom_events INSERT を atomic に)。
 
@@ -98,6 +123,25 @@ tests/
 | `GET /v1/projects/{p}/integrity` | invariant audit report (常に 200) |
 
 エラー envelope: `{error_type, error, details?}` 統一。HTTP code は `error_type` ベースで決定 (`api/error_handlers.py`)。
+
+## UI レイヤ (`/ui` HTML + HTMX)
+
+`web/routes.py` は `/v1` の handler を **直接 import / await** する (HTTP for localhost を経由しない、SessionDep をそのまま透過)。HTMX による partial swap で 7 秒 polling と form post 即時反映を実現。
+
+| route | 用途 |
+|---|---|
+| `GET /ui/` | landing (localStorage の recent projects + project 入力) |
+| `GET /ui/projects/{p}/threads` | thread 一覧 page |
+| `GET /ui/projects/{p}/threads/_rows` | thread rows partial (polling target) |
+| `GET /ui/projects/{p}/threads/{tid}` | thread 詳細 page (full \| summary) |
+| `GET /ui/projects/{p}/threads/{tid}/_messages` | messages partial |
+| `GET /ui/projects/{p}/events` / `_rows` | events page + partial |
+| `GET /ui/projects/{p}/integrity` / `_body` | audit report page + partial |
+| `POST /ui/projects/{p}/threads` | open_thread form (success → `HX-Redirect`) |
+| `POST /ui/projects/{p}/threads/{tid}/messages` | post_message form (success → `HX-Trigger: messagePosted`) |
+| `POST /ui/projects/{p}/threads/{tid}/close` | close_thread form (success → `HX-Refresh: true`) |
+
+`ChatroomError` / `pydantic.ValidationError` はいずれも 200 + `partials/flash.html` で inline 表示 (HTMX swap が必ず発火するため)。詳細は `docs/usage-cheatsheet.md` の「UI 経由」セクション。
 
 ## 主要不変条件
 
@@ -136,21 +180,24 @@ decide+closes_thread を closed status に投げると `ChatroomStateError`。
 ## テスト方針
 
 ```
-tests/unit/        # 100 cases, 0.19s
+tests/unit/        # 100 cases (services の pure 部分)
   test_status_transition.py    # 全 type × 全 status matrix
   test_permissions.py          # owner check
   test_msg_id_allocator.py     # format/parse round-trip
   test_integrity.py            # assert_closes_thread_rule
   test_exceptions.py           # 階層 + details propagation
 
-tests/integration/ # 30 cases, 3.57s, testcontainers postgres:16
+tests/integration/ # 54 cases, testcontainers postgres:16
   conftest.py              # postgres container + alembic + fixtures
   test_api_threads.py      # open / list / get e2e
   test_api_messages.py     # post + transitions + concurrent allocator
   test_api_close.py        # close shortcut + permission + state
   test_api_events.py       # audit log filter
   test_api_integrity.py    # injection + project scope
+  test_ui_routes.py        # /ui page + fragment + form post smoke (24)
 ```
+
+合計 154 cases / coverage 78%。
 
 実行: `.venv/bin/pytest tests/` (両方) / `pytest tests/unit/` (高速のみ) / `pytest tests/integration/` (DB 必要)。
 
@@ -168,6 +215,12 @@ journalctl -u spirrow-conclair.service -f
 uv sync
 .venv/bin/alembic upgrade head
 .venv/bin/uvicorn spirrow_conclair.main:app --reload --port 8115
+```
+
+UI を開発 PC のブラウザで開く:
+```bash
+ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
+# 開発 PC のブラウザで http://localhost:8115/ui/
 ```
 
 ## 外部依存
@@ -190,6 +243,8 @@ uv sync
 ## 拡張ポイント
 
 `docs/api-design.md` §6 に v1 スコープ外 (認証 / cross-project references / thread rename/merge/supersede / 添付 / WebSocket / 全文検索) が列挙されている。必要時にここに endpoint を追加する流儀。
+
+UI (`/ui`) も **loopback bind + auth なし** が前提。VPN 越しで複数人に開放するなら、まず `web/routes.py` 全体に session-based auth 層を被せ、`HX-Trigger`/`HX-Redirect` 等のヘッダ運用を変えずに保つのが筋。CSRF 対策は現状 same-origin + form のみで成立しているが、cross-origin にする場合は再設計が必要。
 
 ## 関連プロジェクト
 
