@@ -13,22 +13,33 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
-from fastapi import APIRouter, Path, Query, Request
+from fastapi import APIRouter, Form, Path, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 
 from spirrow_conclair import __version__
 from spirrow_conclair.api.events import list_events as api_list_events
 from spirrow_conclair.api.integrity import check_integrity as api_check_integrity
+from spirrow_conclair.api.messages import post_message as api_post_message
 from spirrow_conclair.api.threads import (
+    close_thread as api_close_thread,
     get_thread as api_get_thread,
     list_threads as api_list_threads,
+    open_thread as api_open_thread,
 )
 from spirrow_conclair.db import SessionDep
 from spirrow_conclair.exceptions import ChatroomError, ChatroomNotFoundError
-from spirrow_conclair.schemas import ThreadStatus
+from spirrow_conclair.schemas import (
+    CloseThreadRequest,
+    OpenThreadRequest,
+    PostMessageRequest,
+    ThreadStatus,
+)
 from spirrow_conclair.web.deps import get_templates
+from spirrow_conclair.web.forms import parse_csv
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 
@@ -368,7 +379,178 @@ async def integrity_fragment(
     )
 
 
-# Re-exported so T17 can attach POST endpoints + reuse helpers.
+# ---------------------------------------------------------------------------
+# Form posts — open / post / close
+# ---------------------------------------------------------------------------
+#
+# Each POST endpoint:
+#   1. parses Form(...) values, builds a pydantic Request schema
+#   2. catches pydantic ValidationError → flash partial (200 OK)
+#   3. awaits the corresponding /v1 handler in-process
+#   4. catches ChatroomError → flash partial (200 OK)
+#   5. returns success flash + an HX-* response header to drive the UI:
+#       - HX-Redirect: full navigation (open_thread → detail)
+#       - HX-Trigger: messagePosted → forces #messages partial re-fetch
+#       - HX-Refresh: full reload (close → reflect resolved status)
+#
+# We always return status 200 + flash partial because HTMX swap behaviour on
+# 4xx is server-defined and surfacing the error inline is more useful than
+# letting the browser show a default error overlay.
+
+
+def _validation_flash(request: Request, err: ValidationError) -> HTMLResponse:
+    return _render(
+        request,
+        "partials/flash.html",
+        {
+            "error_type": "ValidationError",
+            "error": "Form validation failed",
+            "details": {"errors": err.errors()},
+        },
+    )
+
+
+@router.post(
+    "/projects/{project}/threads",
+    response_class=HTMLResponse,
+    summary="Open a new thread (form post)",
+)
+async def threads_open(
+    request: Request,
+    project: ProjectPath,
+    session: SessionDep,
+    thread_id: Annotated[str, Form()],
+    title: Annotated[str, Form()],
+    owner: Annotated[str, Form()],
+    propose_content: Annotated[str, Form()],
+    tags: Annotated[str, Form()] = "",
+    commit_ref: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    try:
+        body = OpenThreadRequest(
+            thread_id=thread_id,
+            title=title,
+            owner=owner,
+            propose_content=propose_content,
+            tags=parse_csv(tags),
+            commit_ref=commit_ref or None,
+        )
+    except ValidationError as e:
+        return _validation_flash(request, e)
+
+    try:
+        result = await api_open_thread(project=project, body=body, session=session)
+    except ChatroomError as e:
+        return _flash_response(request, e)
+
+    target = f"/ui/projects/{quote(project, safe='')}/threads/{quote(result.thread.thread_id, safe='')}"
+    return _render(
+        request,
+        "partials/flash.html",
+        {"message": f"opened thread '{result.thread.thread_id}' — redirecting…"},
+        headers={"HX-Redirect": target},
+    )
+
+
+@router.post(
+    "/projects/{project}/threads/{thread_id}/messages",
+    response_class=HTMLResponse,
+    summary="Post a message in a thread (form post)",
+)
+async def messages_post(
+    request: Request,
+    project: ProjectPath,
+    thread_id: ThreadIdPath,
+    session: SessionDep,
+    type: Annotated[str, Form()],
+    author: Annotated[str, Form()],
+    content: Annotated[str, Form()],
+    reply_to: Annotated[str, Form()] = "",
+    references_threads: Annotated[str, Form()] = "",
+    related_tasks: Annotated[str, Form()] = "",
+    closes_thread: Annotated[str, Form()] = "",
+    tags: Annotated[str, Form()] = "",
+    commit_ref: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    try:
+        body = PostMessageRequest(
+            type=type,  # type: ignore[arg-type]
+            author=author,
+            content=content,
+            reply_to=reply_to or None,
+            references_threads=parse_csv(references_threads),
+            related_tasks=parse_csv(related_tasks),
+            closes_thread=closes_thread or None,
+            tags=parse_csv(tags),
+            commit_ref=commit_ref or None,
+        )
+    except ValidationError as e:
+        return _validation_flash(request, e)
+
+    try:
+        result = await api_post_message(
+            project=project, thread_id=thread_id, body=body, session=session
+        )
+    except ChatroomError as e:
+        return _flash_response(request, e)
+
+    msg = f"posted {result.msg.msg_id} ({result.msg.type})"
+    if result.thread_status_changed_to:
+        msg += f" — status → {result.thread_status_changed_to}"
+
+    return _render(
+        request,
+        "partials/flash.html",
+        {"message": msg},
+        headers={"HX-Trigger": "messagePosted"},
+    )
+
+
+@router.post(
+    "/projects/{project}/threads/{thread_id}/close",
+    response_class=HTMLResponse,
+    summary="Close a thread (owner-only, form post)",
+)
+async def threads_close(
+    request: Request,
+    project: ProjectPath,
+    thread_id: ThreadIdPath,
+    session: SessionDep,
+    author: Annotated[str, Form()],
+    summary_content: Annotated[str, Form()],
+    affects_threads: Annotated[str, Form()] = "",
+    related_tasks: Annotated[str, Form()] = "",
+    tags: Annotated[str, Form()] = "",
+    commit_ref: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    try:
+        body = CloseThreadRequest(
+            author=author,
+            summary_content=summary_content,
+            affects_threads=parse_csv(affects_threads),
+            related_tasks=parse_csv(related_tasks),
+            tags=parse_csv(tags),
+            commit_ref=commit_ref or None,
+        )
+    except ValidationError as e:
+        return _validation_flash(request, e)
+
+    try:
+        await api_close_thread(
+            project=project, thread_id=thread_id, body=body, session=session
+        )
+    except ChatroomError as e:
+        return _flash_response(request, e)
+
+    return _render(
+        request,
+        "partials/flash.html",
+        {"message": f"closed thread '{thread_id}'"},
+        headers={"HX-Refresh": "true"},
+    )
+
+
+# Re-exported so future modules can attach more endpoints + reuse helpers.
 __all__ = [
     "router",
     "_render",

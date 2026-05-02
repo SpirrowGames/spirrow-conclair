@@ -48,9 +48,42 @@
     </table>
 
     <p class="muted text-right">total: <strong>{{ result.total }}</strong></p>
+</section>
 
-    <div class="row">
-        <a href="/ui/projects/{{ project }}/threads/new" class="btn btn-primary">+ new thread</a>
-    </div>
+<section class="card">
+    <details>
+        <summary><strong>+ open new thread</strong></summary>
+        <form class="stack-form"
+              hx-post="/ui/projects/{{ project }}/threads"
+              hx-target="#flash-open"
+              hx-swap="innerHTML"
+              hx-on::after-request="if(event.detail.successful) this.reset()">
+            <div class="row">
+                <label>thread_id
+                    <input name="thread_id" type="text" placeholder="T-MY-1" required>
+                </label>
+                <label>title
+                    <input name="title" type="text" required>
+                </label>
+                <label>owner
+                    <input name="owner" type="text" placeholder="(your handle)" required>
+                </label>
+            </div>
+            <label>propose content
+                <textarea name="propose_content" required
+                          placeholder="議論の起点となる propose 本文"></textarea>
+            </label>
+            <div class="row">
+                <label>tags (csv)
+                    <input name="tags" type="text" placeholder="tag1,tag2">
+                </label>
+                <label>commit_ref
+                    <input name="commit_ref" type="text" placeholder="(optional)">
+                </label>
+            </div>
+            <button type="submit" class="btn btn-primary">open thread</button>
+        </form>
+        <div id="flash-open"></div>
+    </details>
 </section>
 {% endblock %}

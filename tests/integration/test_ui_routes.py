@@ -200,3 +200,231 @@ async def test_integrity_fragment(client: AsyncClient) -> None:
     assert resp.status_code == 200
     assert "<!DOCTYPE html>" not in resp.text
     assert "issue_count" in resp.text
+
+
+# ---- form posts ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_open_thread_form_redirects(client: AsyncClient) -> None:
+    resp = await client.post(
+        f"/ui/projects/{PROJECT}/threads",
+        data={
+            "thread_id": "T-FORM-1",
+            "title": "form open",
+            "owner": "form-tester",
+            "propose_content": "via form",
+            "tags": "ui,form",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("hx-redirect") == f"/ui/projects/{PROJECT}/threads/T-FORM-1"
+    assert "opened thread" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_open_thread_form_duplicate_returns_flash(client: AsyncClient) -> None:
+    payload = {
+        "thread_id": "T-DUP",
+        "title": "first",
+        "owner": "form-tester",
+        "propose_content": "first body",
+    }
+    resp1 = await client.post(f"/ui/projects/{PROJECT}/threads", data=payload)
+    assert resp1.status_code == 200
+    assert "hx-redirect" in {k.lower() for k in resp1.headers.keys()}
+
+    resp2 = await client.post(f"/ui/projects/{PROJECT}/threads", data=payload)
+    assert resp2.status_code == 200
+    # No redirect on the second attempt — should be an inline flash.
+    assert "hx-redirect" not in {k.lower() for k in resp2.headers.keys()}
+    assert "ChatroomIntegrityError" in resp2.text
+
+
+@pytest.mark.asyncio
+async def test_open_thread_form_validation_error(client: AsyncClient) -> None:
+    # Whitespace-only owner survives FastAPI Form() (which collapses empty
+    # strings to None) but fails OpenThreadRequest's str_strip_whitespace +
+    # min_length=1 — exactly what we want our flash partial to render.
+    resp = await client.post(
+        f"/ui/projects/{PROJECT}/threads",
+        data={
+            "thread_id": "T-BAD",
+            "title": "x",
+            "owner": "   ",
+            "propose_content": "y",
+        },
+    )
+    assert resp.status_code == 200
+    assert "ValidationError" in resp.text
+    assert "owner" in resp.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_message_form_triggers_messagePosted(
+    client: AsyncClient,
+) -> None:
+    # Seed thread first.
+    await client.post(
+        f"/v1/projects/{PROJECT}/threads",
+        json={
+            "thread_id": "T-MSG-FORM",
+            "title": "msg form",
+            "owner": "tester",
+            "propose_content": "kickoff",
+        },
+    )
+
+    resp = await client.post(
+        f"/ui/projects/{PROJECT}/threads/T-MSG-FORM/messages",
+        data={
+            "type": "question",
+            "author": "tester",
+            "content": "any thoughts",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("hx-trigger") == "messagePosted"
+    assert "posted msg-002" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_post_message_form_handoff_status_change(
+    client: AsyncClient,
+) -> None:
+    await client.post(
+        f"/v1/projects/{PROJECT}/threads",
+        json={
+            "thread_id": "T-HANDOFF",
+            "title": "handoff",
+            "owner": "tester",
+            "propose_content": "kickoff",
+        },
+    )
+
+    resp = await client.post(
+        f"/ui/projects/{PROJECT}/threads/T-HANDOFF/messages",
+        data={
+            "type": "handoff",
+            "author": "tester",
+            "content": "over to you",
+        },
+    )
+    assert resp.status_code == 200
+    assert "status" in resp.text
+    assert "awaiting_reply" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_post_message_form_thread_not_found(client: AsyncClient) -> None:
+    resp = await client.post(
+        f"/ui/projects/{PROJECT}/threads/T-NOPE/messages",
+        data={
+            "type": "question",
+            "author": "tester",
+            "content": "x",
+        },
+    )
+    assert resp.status_code == 200
+    assert "ChatroomNotFoundError" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_close_thread_form_owner_succeeds(client: AsyncClient) -> None:
+    await client.post(
+        f"/v1/projects/{PROJECT}/threads",
+        json={
+            "thread_id": "T-CLOSE-OK",
+            "title": "close ok",
+            "owner": "alice",
+            "propose_content": "kickoff",
+        },
+    )
+
+    resp = await client.post(
+        f"/ui/projects/{PROJECT}/threads/T-CLOSE-OK/close",
+        data={
+            "author": "alice",
+            "summary_content": "## Resolution\nshipping",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("hx-refresh") == "true"
+    assert "closed thread" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_close_thread_form_non_owner_403_flash(client: AsyncClient) -> None:
+    await client.post(
+        f"/v1/projects/{PROJECT}/threads",
+        json={
+            "thread_id": "T-CLOSE-DENY",
+            "title": "deny",
+            "owner": "alice",
+            "propose_content": "kickoff",
+        },
+    )
+
+    resp = await client.post(
+        f"/ui/projects/{PROJECT}/threads/T-CLOSE-DENY/close",
+        data={
+            "author": "bob",
+            "summary_content": "## Resolution\nattempt",
+        },
+    )
+    assert resp.status_code == 200
+    assert "hx-refresh" not in {k.lower() for k in resp.headers.keys()}
+    assert "ChatroomPermissionError" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_close_thread_already_resolved_state_error(
+    client: AsyncClient,
+) -> None:
+    await client.post(
+        f"/v1/projects/{PROJECT}/threads",
+        json={
+            "thread_id": "T-DOUBLE-CLOSE",
+            "title": "double",
+            "owner": "alice",
+            "propose_content": "kickoff",
+        },
+    )
+    # First close succeeds.
+    first = await client.post(
+        f"/ui/projects/{PROJECT}/threads/T-DOUBLE-CLOSE/close",
+        data={"author": "alice", "summary_content": "first close"},
+    )
+    assert first.status_code == 200
+    assert first.headers.get("hx-refresh") == "true"
+
+    # Second close should be a state error flash.
+    second = await client.post(
+        f"/ui/projects/{PROJECT}/threads/T-DOUBLE-CLOSE/close",
+        data={"author": "alice", "summary_content": "second close"},
+    )
+    assert second.status_code == 200
+    assert "hx-refresh" not in {k.lower() for k in second.headers.keys()}
+    assert "ChatroomStateError" in second.text or "ChatroomIntegrityError" in second.text
+
+
+@pytest.mark.asyncio
+async def test_thread_detail_post_form_present_when_active(
+    client: AsyncClient,
+) -> None:
+    await client.post(
+        f"/v1/projects/{PROJECT}/threads",
+        json={
+            "thread_id": "T-FORM-VISIBLE",
+            "title": "visible",
+            "owner": "tester",
+            "propose_content": "kickoff",
+        },
+    )
+
+    resp = await client.get(f"/ui/projects/{PROJECT}/threads/T-FORM-VISIBLE")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "post message" in body.lower()
+    assert 'hx-post="/ui/projects/' in body
+    assert "close thread (owner only)" in body.lower()

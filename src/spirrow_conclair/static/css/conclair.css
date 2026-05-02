@@ -299,6 +299,30 @@ textarea {
     background: rgba(158, 206, 106, 0.08);
 }
 
+/* stacked form (open/post/close) */
+.stack-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 10px 0;
+}
+.stack-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    flex: 1;
+    min-width: 0;
+}
+.stack-form .row label { font-size: 12px; }
+details > summary {
+    cursor: pointer;
+    padding: 6px 0;
+    user-select: none;
+}
+details[open] > summary { margin-bottom: 8px; }
+
 /* filter form */
 .filter-form {
     display: flex;

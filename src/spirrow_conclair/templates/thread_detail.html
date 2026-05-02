@@ -56,9 +56,88 @@
     </div>
 </section>
 
+{% set is_open = view.thread.status not in ("resolved", "superseded") %}
+
+{% if is_open %}
 <section class="card">
-    <h2>post / close</h2>
-    <p class="muted">投稿フォームと close 操作は T17 で実装します。</p>
+    <h2>post message</h2>
+    <form class="stack-form"
+          hx-post="/ui/projects/{{ project }}/threads/{{ thread_id }}/messages"
+          hx-target="#flash-post"
+          hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful) this.querySelector('textarea[name=content]').value=''">
+        <div class="row">
+            <label>type
+                <select name="type">
+                    {% for t in ["question", "answer", "report", "handoff", "ack", "decide"] %}
+                    <option value="{{ t }}">{{ t }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>reply_to
+                <input name="reply_to" type="text" placeholder="msg-NNN (optional)">
+            </label>
+            <label>closes_thread
+                <input name="closes_thread" type="text"
+                       placeholder="(decide のみ; 通常は close ボタンを使う)">
+            </label>
+        </div>
+        <label>content
+            <textarea name="content" required
+                      placeholder="ここに本文を書く"></textarea>
+        </label>
+        <div class="row">
+            <label>tags <input name="tags" type="text" placeholder="tag1,tag2"></label>
+            <label>related_tasks <input name="related_tasks" type="text" placeholder="T01,T02"></label>
+            <label>references_threads <input name="references_threads" type="text" placeholder="T-OTHER-1"></label>
+            <label>commit_ref <input name="commit_ref" type="text" placeholder="(optional)"></label>
+        </div>
+        <button type="submit" class="btn btn-primary">post</button>
+        <span class="muted" style="margin-left:8px;">
+            author は navbar の入力 + localStorage から自動付与
+        </span>
+    </form>
+    <div id="flash-post"></div>
 </section>
+
+<section class="card">
+    <h2>close thread (owner only)</h2>
+    <p class="muted">
+        close は owner にのみ許可されます (それ以外は 403)。
+        2 度目の close は state error (409)。
+    </p>
+    <form class="stack-form"
+          hx-post="/ui/projects/{{ project }}/threads/{{ thread_id }}/close"
+          hx-target="#flash-close"
+          hx-confirm="この thread を resolved にしますか？"
+          hx-swap="innerHTML">
+        <label>summary
+            <textarea name="summary_content" required
+                      placeholder="## Resolution&#10;..."></textarea>
+        </label>
+        <div class="row">
+            <label>affects_threads
+                <input name="affects_threads" type="text"
+                       placeholder="T-OTHER-1,T-OTHER-2">
+            </label>
+            <label>related_tasks
+                <input name="related_tasks" type="text" placeholder="T01,T02">
+            </label>
+            <label>tags
+                <input name="tags" type="text" placeholder="tag1,tag2">
+            </label>
+        </div>
+        <button type="submit" class="btn btn-danger">close (decide + resolved)</button>
+    </form>
+    <div id="flash-close"></div>
+</section>
+{% else %}
+<section class="card">
+    <p class="muted">
+        この thread は <strong>{{ view.thread.status }}</strong> のため、
+        新規メッセージ投稿 / close は受け付けません。
+    </p>
+</section>
+{% endif %}
 {% endif %}
 {% endblock %}
