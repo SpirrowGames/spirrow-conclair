@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}{{ thread_id }} — {{ project }}{% endblock %}
+
+{% block content %}
+{% if view is none %}
+<section class="card">
+    <div class="alert alert-error">
+        <strong>{{ error_type }}</strong>: {{ error }}
+    </div>
+    <p><a href="/ui/projects/{{ project }}/threads">← back to threads</a></p>
+</section>
+{% else %}
+<section class="card">
+    <p class="muted">
+        <a href="/ui/projects/{{ project }}/threads">← threads</a>
+        &nbsp;|&nbsp;
+        mode:
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=full"
+           class="{% if mode == 'full' %}active{% endif %}">full</a>
+        /
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=summary"
+           class="{% if mode == 'summary' %}active{% endif %}">summary</a>
+    </p>
+
+    <h1>
+        <code>{{ view.thread.thread_id }}</code>
+        <span class="status status-{{ view.thread.status }}">{{ view.thread.status }}</span>
+    </h1>
+    <h2>{{ view.thread.title }}</h2>
+
+    <div class="muted">
+        owner: <strong>{{ view.thread.owner }}</strong>
+        &nbsp;|&nbsp; created: {{ view.thread.created_at | iso }}
+        {% if view.thread.resolved_by_msg %}
+        &nbsp;|&nbsp; resolved by: <code>{{ view.thread.resolved_by_msg }}</code>
+        {% endif %}
+        {% if view.thread.tags %}
+        &nbsp;|&nbsp; tags: {{ view.thread.tags | join(", ") }}
+        {% endif %}
+        {% if view.thread.affects_threads %}
+        &nbsp;|&nbsp; affects: {{ view.thread.affects_threads | join(", ") }}
+        {% endif %}
+    </div>
+</section>
+
+<section class="card">
+    <h2>messages
+        <span class="muted" style="font-size: 0.85em;">({{ view.messages | length }})</span>
+    </h2>
+    <div id="messages"
+         hx-get="/ui/projects/{{ project }}/threads/{{ thread_id }}/_messages?mode={{ mode }}"
+         hx-trigger="load delay:50ms, every 7s, messagePosted from:body"
+         hx-swap="innerHTML">
+        {% include "partials/message_list.html" %}
+    </div>
+</section>
+
+<section class="card">
+    <h2>post / close</h2>
+    <p class="muted">投稿フォームと close 操作は T17 で実装します。</p>
+</section>
+{% endif %}
+{% endblock %}

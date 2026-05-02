@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}threads — {{ project }}{% endblock %}
+
+{% block content %}
+<section class="card">
+    <h1>threads</h1>
+    <p class="muted">project: <strong>{{ project }}</strong></p>
+
+    <form id="thread-filter" class="filter-form"
+          hx-get="/ui/projects/{{ project }}/threads/_rows"
+          hx-trigger="change, load delay:50ms, every 7s"
+          hx-target="#thread-rows"
+          hx-include="this"
+          hx-swap="innerHTML">
+        <label>status
+            <select name="status" multiple size="5">
+                {% for s in ["active", "awaiting_reply", "resolved", "superseded", "parked"] %}
+                <option value="{{ s }}"
+                        {% if s in filter_status %}selected{% endif %}>{{ s }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>owner
+            <input name="owner" type="text" value="{{ filter_owner }}" placeholder="(any)">
+        </label>
+        <label>limit
+            <input name="limit" type="number" value="{{ filter_limit }}" min="1" max="1000">
+        </label>
+        <label>offset
+            <input name="offset" type="number" value="{{ filter_offset }}" min="0">
+        </label>
+    </form>
+
+    <table class="table">
+        <thead>
+            <tr>
+                <th>thread_id</th>
+                <th>title</th>
+                <th>status</th>
+                <th>owner</th>
+                <th>created</th>
+            </tr>
+        </thead>
+        <tbody id="thread-rows">
+            {% include "partials/thread_rows.html" %}
+        </tbody>
+    </table>
+
+    <p class="muted text-right">total: <strong>{{ result.total }}</strong></p>
+
+    <div class="row">
+        <a href="/ui/projects/{{ project }}/threads/new" class="btn btn-primary">+ new thread</a>
+    </div>
+</section>
+{% endblock %}

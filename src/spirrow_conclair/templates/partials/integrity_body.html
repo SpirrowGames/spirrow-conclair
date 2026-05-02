@@ -1,0 +1,35 @@
+<p class="muted">
+    issue_count: <strong>{{ result.issue_count }}</strong>
+    &nbsp;|&nbsp; checked_at: {{ result.checked_at | iso }}
+</p>
+
+{% if result.issues %}
+<table class="table">
+    <thead>
+        <tr>
+            <th>type</th>
+            <th>thread_id</th>
+            <th>msg_id</th>
+            <th>details</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for issue in result.issues %}
+        <tr>
+            <td><span class="badge badge-handoff">{{ issue.type }}</span></td>
+            <td>
+                {% if issue.thread_id %}
+                <a href="/ui/projects/{{ project }}/threads/{{ issue.thread_id }}">
+                    <code>{{ issue.thread_id }}</code>
+                </a>
+                {% endif %}
+            </td>
+            <td>{% if issue.msg_id %}<code>{{ issue.msg_id }}</code>{% endif %}</td>
+            <td><code>{{ issue.details | tojson }}</code></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="alert alert-success">no integrity issues</div>
+{% endif %}

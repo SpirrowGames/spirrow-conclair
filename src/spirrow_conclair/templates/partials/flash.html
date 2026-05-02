@@ -1,0 +1,10 @@
+{% if error_type %}
+<div class="alert alert-error">
+    <strong>{{ error_type }}</strong>: {{ error }}
+    {% if details %}
+    <pre>{{ details | tojson(indent=2) }}</pre>
+    {% endif %}
+</div>
+{% else %}
+<div class="alert alert-success">{{ message or "OK" }}</div>
+{% endif %}

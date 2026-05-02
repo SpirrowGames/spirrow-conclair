@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}events — {{ project }}{% endblock %}
+
+{% block content %}
+<section class="card">
+    <h1>events</h1>
+    <p class="muted">project: <strong>{{ project }}</strong> &nbsp;|&nbsp; audit log (read-only)</p>
+
+    <form id="event-filter" class="filter-form"
+          hx-get="/ui/projects/{{ project }}/events/_rows"
+          hx-trigger="change, load delay:50ms, every 7s"
+          hx-target="#event-rows"
+          hx-include="this"
+          hx-swap="innerHTML">
+        <label>action
+            <select name="action">
+                <option value="">(any)</option>
+                {% for a in actions %}
+                <option value="{{ a }}" {% if filter_action == a %}selected{% endif %}>{{ a }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>thread_id
+            <input name="thread_id" type="text" value="{{ filter_thread_id }}" placeholder="(any)">
+        </label>
+        <label>since (ISO)
+            <input name="since" type="text" value="{{ filter_since }}" placeholder="2026-05-01T00:00:00Z">
+        </label>
+        <label>until (ISO)
+            <input name="until" type="text" value="{{ filter_until }}" placeholder="2026-06-01T00:00:00Z">
+        </label>
+        <label>limit
+            <input name="limit" type="number" value="{{ filter_limit }}" min="1" max="1000">
+        </label>
+        <label>offset
+            <input name="offset" type="number" value="{{ filter_offset }}" min="0">
+        </label>
+    </form>
+
+    <table class="table">
+        <thead>
+            <tr>
+                <th>timestamp</th>
+                <th>action</th>
+                <th>actor</th>
+                <th>thread_id</th>
+                <th>msg_id</th>
+            </tr>
+        </thead>
+        <tbody id="event-rows">
+            {% include "partials/event_rows.html" %}
+        </tbody>
+    </table>
+
+    <p class="muted text-right">total: <strong>{{ result.total }}</strong></p>
+</section>
+{% endblock %}

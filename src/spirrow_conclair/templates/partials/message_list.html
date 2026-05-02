@@ -1,0 +1,33 @@
+{% if view.messages %}
+    {% for m in view.messages %}
+    <article class="msg msg-{{ m.type }}">
+        <header class="msg-header">
+            <code class="msg-id">{{ m.msg_id }}</code>
+            <span class="msg-author">{{ m.author }}</span>
+            <span class="badge badge-{{ m.type }}">{{ m.type }}</span>
+            <time>{{ m.timestamp | iso }}</time>
+        </header>
+        <div class="msg-content">{{ m.content }}</div>
+        {% if m.reply_to %}
+        <div class="msg-meta">↪ reply to <code>{{ m.reply_to }}</code></div>
+        {% endif %}
+        {% if m.closes_thread %}
+        <div class="msg-meta">closes thread: <code>{{ m.closes_thread }}</code></div>
+        {% endif %}
+        {% if m.references_threads %}
+        <div class="msg-meta">references: {{ m.references_threads | join(", ") }}</div>
+        {% endif %}
+        {% if m.related_tasks %}
+        <div class="msg-meta">tasks: {{ m.related_tasks | join(", ") }}</div>
+        {% endif %}
+        {% if m.tags %}
+        <div class="msg-meta">tags: {{ m.tags | join(", ") }}</div>
+        {% endif %}
+        {% if m.commit_ref %}
+        <div class="msg-meta">commit: <code>{{ m.commit_ref }}</code></div>
+        {% endif %}
+    </article>
+    {% endfor %}
+{% else %}
+    <p class="muted">no messages yet</p>
+{% endif %}

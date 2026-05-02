@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block title %}integrity — {{ project }}{% endblock %}
+
+{% block content %}
+<section class="card">
+    <h1>integrity audit</h1>
+    <p class="muted">
+        project: <strong>{{ project }}</strong>
+        &nbsp;|&nbsp; report-only (常に 200) &nbsp;|&nbsp; auto-refresh: 7s
+    </p>
+
+    <div id="integrity-body"
+         hx-get="/ui/projects/{{ project }}/integrity/_body"
+         hx-trigger="load delay:50ms, every 7s"
+         hx-swap="innerHTML">
+        {% include "partials/integrity_body.html" %}
+    </div>
+</section>
+{% endblock %}

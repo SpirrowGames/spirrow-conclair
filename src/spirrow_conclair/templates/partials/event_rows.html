@@ -1,0 +1,21 @@
+{% if result.items %}
+    {% for e in result.items %}
+    <tr>
+        <td>{{ e.timestamp | iso }}</td>
+        <td><span class="badge">{{ e.action }}</span></td>
+        <td>{{ e.actor }}</td>
+        <td>
+            {% if e.thread_id %}
+            <a href="/ui/projects/{{ project }}/threads/{{ e.thread_id }}">
+                <code>{{ e.thread_id }}</code>
+            </a>
+            {% endif %}
+        </td>
+        <td>{% if e.msg_id %}<code>{{ e.msg_id }}</code>{% endif %}</td>
+    </tr>
+    {% endfor %}
+{% else %}
+    <tr>
+        <td colspan="5" class="muted">no events match these filters</td>
+    </tr>
+{% endif %}
