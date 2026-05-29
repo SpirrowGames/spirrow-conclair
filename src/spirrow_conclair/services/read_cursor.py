@@ -2,44 +2,22 @@
 
 The DB-aware upsert + ChatroomEvent emission lives in
 ``api/read_cursor.py`` next to the route so the txn boundary is
-explicit (matches the pattern in ``api/threads.py``). This module is
-just the two arithmetic decisions: how many msgs are unread, and is
-this mark_read actually advancing forward.
+explicit (matches the pattern in ``api/threads.py``). This module
+hosts the monotonic-forward rule the cursor advance path needs.
 
-The monotonic-forward rule (the user picked "rewind = silent no-op")
-is encoded in ``should_advance_cursor``: it returns False whenever the
-requested cursor is at or behind the current one. The route then short-
-circuits without writing.
+Note: an earlier ``compute_unread_count`` helper was removed here in
+favor of doing the count in SQL: ``msg_id`` is allocated project-wide
+and shared across threads, so any pure-Python arithmetic on
+``parse(latest) - parse(cursor)`` over-counts msgs from sibling
+threads. The corrected per-thread count is computed via a correlated
+subquery inside ``api/read_cursor.list_unread`` -- the SQL is the
+single source of truth for "how many msgs in this thread are after
+the cursor".
 """
 
 from __future__ import annotations
 
 from spirrow_conclair.services.msg_id_allocator import parse_msg_id
-
-
-def compute_unread_count(
-    latest_msg_id: str | None,
-    last_read_msg_id: str | None,
-) -> int:
-    """Return how many msgs after the cursor exist in the thread.
-
-    Semantics:
-    - ``latest_msg_id is None`` (empty thread) -> 0 (nothing to read).
-    - ``last_read_msg_id is None`` (cursor row absent for this identity)
-      -> the whole thread is unread; returns ``parse(latest)`` which is
-      the count of msgs from msg-001 onward.
-    - Otherwise: ``parse(latest) - parse(cursor)``, clamped at 0 to
-      cover the no-op-rewind case where a stale cursor value somehow
-      survived after a thread shrink (not actually supported, but cheap
-      to guard).
-    """
-    if not latest_msg_id:
-        return 0
-    latest = parse_msg_id(latest_msg_id)
-    if not last_read_msg_id:
-        return latest
-    diff = latest - parse_msg_id(last_read_msg_id)
-    return diff if diff > 0 else 0
 
 
 def should_advance_cursor(
@@ -56,6 +34,13 @@ def should_advance_cursor(
     position or older is a deliberate no-op, not an error, so the route
     surfaces this as ``advanced=False`` with the current cursor
     unchanged in the response.
+
+    Note: this is the one case where project-wide ``msg_id`` numeric
+    comparison is the correct semantics. The cursor is always advanced
+    to a msg known to be in this thread (the route validates the input
+    msg_id, or picks the thread's own latest), so comparing two
+    project-wide values that we know are both in the same thread
+    correctly answers "is the new position strictly newer".
     """
     if current is None:
         return True

@@ -25,10 +25,7 @@ from spirrow_conclair.schemas import (
     UnreadThreadItem,
 )
 from spirrow_conclair.services.msg_id_allocator import format_msg_id
-from spirrow_conclair.services.read_cursor import (
-    compute_unread_count,
-    should_advance_cursor,
-)
+from spirrow_conclair.services.read_cursor import should_advance_cursor
 
 router = APIRouter(prefix="/v1/projects/{project}", tags=["read_cursor"])
 
@@ -206,20 +203,6 @@ async def list_unread(
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> UnreadListResponse:
-    # Subquery: latest msg_id per thread in this project (numeric max,
-    # matching msg_id_allocator's ordering).
-    latest_per_thread = (
-        select(
-            Message.thread_id.label("thread_id"),
-            func.max(
-                cast(func.substring(Message.msg_id, 5), BigInteger)
-            ).label("latest_num"),
-        )
-        .where(Message.project == project)
-        .group_by(Message.thread_id)
-        .subquery("latest_per_thread")
-    )
-
     # The cursor subquery is restricted to the requesting identity so
     # the LEFT JOIN below produces NULL when this identity has never
     # marked the thread read.
@@ -235,6 +218,49 @@ async def list_unread(
         .subquery("cursors")
     )
 
+    # ``msg_id`` is allocated project-wide (msg_id_allocator) and shared
+    # across threads in the same project, so per-thread aggregates MUST
+    # be derived from rows that match ``messages.thread_id`` -- not from
+    # numeric subtraction on the project-wide sequence, which would
+    # count msgs from sibling threads. The per-thread counts below stay
+    # in SQL (one GROUP BY) so the inbox is a single round-trip.
+    msg_num = cast(func.substring(Message.msg_id, 5), BigInteger)
+    cursor_num = cast(
+        func.substring(cursor_q.c.last_read_msg_id, 5), BigInteger
+    )
+
+    # Thread metadata: latest msg_id in *this* thread (for the response
+    # `latest_msg_id` and the cursor-advance gate). Window-like rollup
+    # via GROUP BY thread_id.
+    thread_meta = (
+        select(
+            Message.thread_id.label("thread_id"),
+            func.max(msg_num).label("latest_num"),
+            func.count().label("total_count"),
+        )
+        .where(Message.project == project)
+        .group_by(Message.thread_id)
+        .subquery("thread_meta")
+    )
+
+    # Per-thread unread count, *correlated with the cursor*: the count
+    # of msgs in this thread whose numeric msg_id is strictly greater
+    # than the identity's cursor (or all of them when the cursor is
+    # null). Correlated subquery -- a few hundred rows of `messages` per
+    # thread keeps this cheap; if profiling later flags it, the
+    # rewrite is to a lateral join.
+    unread_count_subq = (
+        select(func.count())
+        .select_from(Message)
+        .where(
+            Message.project == project,
+            Message.thread_id == Thread.thread_id,
+            msg_num > func.coalesce(cursor_num, 0),
+        )
+        .correlate(Thread, cursor_q)
+        .scalar_subquery()
+    )
+
     base = (
         select(
             Thread.thread_id.label("thread_id"),
@@ -242,14 +268,13 @@ async def list_unread(
             Thread.status.label("status"),
             Thread.owner.label("owner"),
             Thread.created_at.label("created_at"),
-            latest_per_thread.c.latest_num.label("latest_num"),
+            thread_meta.c.latest_num.label("latest_num"),
             cursor_q.c.last_read_msg_id.label("last_read_msg_id"),
+            unread_count_subq.label("unread_count"),
         )
         .join(
-            latest_per_thread,
-            and_(
-                latest_per_thread.c.thread_id == Thread.thread_id,
-            ),
+            thread_meta,
+            and_(thread_meta.c.thread_id == Thread.thread_id),
             isouter=False,
         )
         .join(
@@ -262,17 +287,12 @@ async def list_unread(
     if not include_resolved:
         base = base.where(Thread.status != "resolved")
 
-    # Unread filter: cursor NULL (never-read) OR latest_num >
-    # parse(last_read_msg_id). Doing the parse in SQL keeps the filter
-    # index-friendly (substring + cast) and matches msg_id_allocator's
-    # numeric ordering exactly.
-    cursor_num = cast(
-        func.substring(cursor_q.c.last_read_msg_id, 5), BigInteger
-    )
-    unread_filter = (cursor_q.c.last_read_msg_id.is_(None)) | (
-        latest_per_thread.c.latest_num > cursor_num
-    )
-    base = base.where(unread_filter)
+    # Unread filter is now expressed against the corrected per-thread
+    # count: a row is in the inbox iff `unread_count > 0`. This
+    # subsumes the previous "cursor NULL OR latest_num > cursor_num"
+    # check (both fall out of "more msgs in this thread than the
+    # cursor records").
+    base = base.where(unread_count_subq > 0)
 
     total = await session.scalar(
         select(func.count()).select_from(base.subquery())
@@ -281,12 +301,9 @@ async def list_unread(
     rows = (
         await session.execute(
             base.order_by(
-                # unread_count desc is order-equivalent to (latest_num -
-                # coalesce(cursor_num, 0)) desc. Pre-fall back to 0 with
-                # COALESCE to avoid NULL polluting the sort.
-                (
-                    latest_per_thread.c.latest_num - func.coalesce(cursor_num, 0)
-                ).desc(),
+                # "Most unread first, then by thread recency" -- the
+                # first page is the actionable surface.
+                unread_count_subq.desc(),
                 Thread.created_at.desc(),
             )
             .limit(limit)
@@ -307,9 +324,7 @@ async def list_unread(
                 owner=row.owner,
                 latest_msg_id=latest_msg_id,
                 last_read_msg_id=row.last_read_msg_id,
-                unread_count=compute_unread_count(
-                    latest_msg_id, row.last_read_msg_id
-                ),
+                unread_count=row.unread_count,
             )
         )
 
