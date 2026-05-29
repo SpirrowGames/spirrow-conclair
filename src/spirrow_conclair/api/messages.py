@@ -45,6 +45,7 @@ async def post_message_in_session(
     tags: list[str] | None = None,
     commit_ref: str | None = None,
     timestamp: datetime | None = None,
+    embodiment: str | None = None,
 ) -> tuple[Message, str | None]:
     """Insert a single message + status-transition event (if any).
 
@@ -98,6 +99,7 @@ async def post_message_in_session(
         related_tasks=related_tasks,
         closes_thread=closes_thread,
         tags=tags,
+        embodiment=embodiment,
     )
     session.add(msg_orm)
     # Make the new msg visible to the status-transition event row insert
@@ -171,6 +173,7 @@ async def post_message(
             tags=body.tags,
             commit_ref=body.commit_ref,
             timestamp=body.timestamp,
+            embodiment=body.embodiment,
         )
 
     return PostMessageResponse(
