@@ -18,7 +18,9 @@ from spirrow_conclair.schemas import EventListResponse
 router = APIRouter(prefix="/v1/projects/{project}/events", tags=["events"])
 
 ProjectPath = Annotated[str, Path(min_length=1, max_length=200)]
-EventAction = Literal["open_thread", "post_message", "status_transition"]
+EventAction = Literal[
+    "open_thread", "post_message", "status_transition", "mark_read",
+]
 
 
 @router.get(

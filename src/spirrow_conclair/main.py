@@ -16,6 +16,7 @@ from spirrow_conclair.api import (
     events_router,
     integrity_router,
     messages_router,
+    read_cursor_router,
     threads_router,
 )
 from spirrow_conclair.api.error_handlers import register_error_handlers
@@ -55,6 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(messages_router)
     app.include_router(events_router)
     app.include_router(integrity_router)
+    app.include_router(read_cursor_router)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

@@ -7,7 +7,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-EventAction = Literal["open_thread", "post_message", "status_transition"]
+EventAction = Literal[
+    "open_thread", "post_message", "status_transition", "mark_read",
+]
 IntegrityIssueType = Literal[
     "missing_propose",
     "closes_thread_by_non_owner",
