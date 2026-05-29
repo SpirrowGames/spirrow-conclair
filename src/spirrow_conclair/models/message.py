@@ -46,6 +46,11 @@ class Message(Base):
     # state-transitioning types ({handoff, ack, decide}) Magickit enforces
     # mandatory declaration with a human-identity exemption.
     embodiment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ADR-2026-05-27-09 / msg-002 §2: per-msg role the author was acting under.
+    # Conclair persists only; role × allowed_roles validation is enforced at
+    # the Magickit orchestration layer against the Prismind identity record
+    # (Conclair must not pull identity state cross-service).
+    role: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("project", "msg_id", name="messages_pkey"),

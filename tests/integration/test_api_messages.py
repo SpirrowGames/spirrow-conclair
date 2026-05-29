@@ -142,6 +142,45 @@ async def test_embodiment_persists_on_post_message(client: AsyncClient) -> None:
     assert body["msg"]["embodiment"] is None
 
 
+async def test_role_persists_on_post_message(client: AsyncClient) -> None:
+    """ADR-2026-05-27-09 / msg-002 §2: role supplied on the body is persisted
+    on the resulting msg row and surfaced on the GET /threads/{tid} fetch.
+    Conclair does not validate role × allowed_roles (Magickit enforces) so
+    any string is round-tripped; a missing field stays null.
+    """
+    await _open(client, "p", "T-1")
+
+    code, body = await _post(
+        client, "p", "T-1",
+        type="report", author="alice", content="declared",
+        role="implementer",
+    )
+    assert code == 201
+    assert body["msg"]["role"] == "implementer"
+
+    r = await client.get("/v1/projects/p/threads/T-1?mode=full")
+    msgs = r.json()["messages"]
+    declared = next(m for m in msgs if m["author"] == "alice" and m["type"] == "report")
+    assert declared["role"] == "implementer"
+
+    # Round-trip an arbitrary, unknown role string (Conclair is value-agnostic).
+    code, body = await _post(
+        client, "p", "T-1",
+        type="report", author="alice", content="exotic",
+        role="some-future-role-not-in-any-allowlist",
+    )
+    assert code == 201
+    assert body["msg"]["role"] == "some-future-role-not-in-any-allowlist"
+
+    # A post without role stays null.
+    code, body = await _post(
+        client, "p", "T-1",
+        type="report", author="alice", content="undeclared",
+    )
+    assert code == 201
+    assert body["msg"]["role"] is None
+
+
 async def test_concurrent_msg_id_allocation(client: AsyncClient) -> None:
     """Concurrent posts must still produce unique, contiguous msg_ids
     thanks to pg_advisory_xact_lock.

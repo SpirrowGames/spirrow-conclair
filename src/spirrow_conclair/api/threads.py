@@ -98,6 +98,7 @@ async def open_thread(
             closes_thread=None,
             tags=list(body.tags),
             embodiment=body.embodiment,
+            role=body.role,
         )
         event_orm = ChatroomEvent(
             project=project,
@@ -253,6 +254,7 @@ async def close_thread(
             commit_ref=body.commit_ref,
             timestamp=body.timestamp,
             embodiment=body.embodiment,
+            role=body.role,
         )
 
     return CloseThreadResponse(

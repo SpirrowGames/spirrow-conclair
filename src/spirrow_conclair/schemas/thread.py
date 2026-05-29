@@ -42,6 +42,10 @@ class OpenThreadRequest(BaseModel):
     # (Einstein N-3 / msg-325 §4) but the receiver is wired here so the
     # value is recorded on the propose msg when supplied.
     embodiment: str | None = None
+    # ADR-2026-05-27-09 / msg-002 §2: role the opener was acting under,
+    # stamped onto the propose msg. Conclair persists verbatim; Magickit
+    # validates against the Prismind identity record before forwarding.
+    role: str | None = None
 
 
 class OpenThreadResponse(BaseModel):
