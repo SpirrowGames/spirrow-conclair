@@ -112,6 +112,36 @@ async def test_sequential_msg_id_allocation(client: AsyncClient) -> None:
     assert msg_ids == [f"msg-{i:03d}" for i in range(1, 32)]
 
 
+async def test_embodiment_persists_on_post_message(client: AsyncClient) -> None:
+    """ADR-2026-05-29-12: embodiment supplied on the body is persisted on
+    the resulting msg row and surfaced on the GET /threads/{tid} fetch.
+    Conclair does not validate the value (validation lives in Magickit)
+    so any string is round-tripped; a missing field stays null."""
+    await _open(client, "p", "T-1")
+
+    code, body = await _post(
+        client, "p", "T-1",
+        type="report", author="alice", content="declared",
+        embodiment="terminal_coding_agent",
+    )
+    assert code == 201
+    assert body["msg"]["embodiment"] == "terminal_coding_agent"
+
+    # Round-trip via the thread fetch.
+    r = await client.get("/v1/projects/p/threads/T-1?mode=full")
+    msgs = {m["msg_id"]: m for m in r.json()["messages"]}
+    declared = next(m for m in msgs.values() if m["author"] == "alice" and m["type"] == "report")
+    assert declared["embodiment"] == "terminal_coding_agent"
+
+    # A second post without embodiment stays null.
+    code, body = await _post(
+        client, "p", "T-1",
+        type="report", author="alice", content="undeclared",
+    )
+    assert code == 201
+    assert body["msg"]["embodiment"] is None
+
+
 async def test_concurrent_msg_id_allocation(client: AsyncClient) -> None:
     """Concurrent posts must still produce unique, contiguous msg_ids
     thanks to pg_advisory_xact_lock.

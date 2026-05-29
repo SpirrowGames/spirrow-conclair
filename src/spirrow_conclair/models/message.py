@@ -41,6 +41,11 @@ class Message(Base):
     )
     closes_thread: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    # ADR-2026-05-29-12: self-declared runtime form of the authoring agent.
+    # Nullable for backward compatibility with pre-ADR-12 messages; on
+    # state-transitioning types ({handoff, ack, decide}) Magickit enforces
+    # mandatory declaration with a human-identity exemption.
+    embodiment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("project", "msg_id", name="messages_pkey"),

@@ -30,6 +30,8 @@ class Message(BaseModel):
     related_tasks: list[str] = Field(default_factory=list)
     closes_thread: str | None = None
     tags: list[str] = Field(default_factory=list)
+    # ADR-2026-05-29-12: self-declared runtime form of the authoring agent.
+    embodiment: str | None = None
 
 
 class PostMessageRequest(BaseModel):
@@ -45,6 +47,7 @@ class PostMessageRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     commit_ref: str | None = None
     timestamp: datetime | None = None
+    embodiment: str | None = None  # ADR-2026-05-29-12 self-declared
 
 
 class PostMessageResponse(BaseModel):
@@ -64,6 +67,9 @@ class CloseThreadRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     commit_ref: str | None = None
     timestamp: datetime | None = None
+    # ADR-2026-05-29-12 self-declared. close emits an internal decide msg
+    # which is in the mandatory set; Magickit enforces, Conclair persists.
+    embodiment: str | None = None
 
 
 class CloseThreadResponse(BaseModel):

@@ -38,6 +38,10 @@ class OpenThreadRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     commit_ref: str | None = None
     timestamp: datetime | None = None
+    # ADR-2026-05-29-12 self-declared. propose is not in the mandatory set
+    # (Einstein N-3 / msg-325 §4) but the receiver is wired here so the
+    # value is recorded on the propose msg when supplied.
+    embodiment: str | None = None
 
 
 class OpenThreadResponse(BaseModel):
