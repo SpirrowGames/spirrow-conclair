@@ -21,6 +21,12 @@ from spirrow_conclair.schemas.message import (
     PostMessageRequest,
     PostMessageResponse,
 )
+from spirrow_conclair.schemas.read_cursor import (
+    MarkReadRequest,
+    MarkReadResponse,
+    UnreadListResponse,
+    UnreadThreadItem,
+)
 from spirrow_conclair.schemas.thread import (
     OpenThreadRequest,
     OpenThreadResponse,
@@ -42,6 +48,8 @@ __all__ = [
     "EventListResponse",
     "IntegrityCheckResponse",
     "IntegrityIssue",
+    "MarkReadRequest",
+    "MarkReadResponse",
     "Message",
     "MessageType",
     "OpenThreadRequest",
@@ -52,4 +60,6 @@ __all__ = [
     "ThreadListResponse",
     "ThreadStatus",
     "ThreadView",
+    "UnreadListResponse",
+    "UnreadThreadItem",
 ]
