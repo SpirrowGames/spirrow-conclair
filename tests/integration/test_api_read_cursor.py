@@ -220,6 +220,86 @@ async def test_unread_partial_read_returns_diff(client: AsyncClient) -> None:
     assert item["unread_count"] == 2
 
 
+async def test_unread_count_is_per_thread_not_project_wide(
+    client: AsyncClient,
+) -> None:
+    """Regression for the project-wide-msg_id arithmetic bug.
+
+    ``msg_id`` is allocated project-wide, so two threads with
+    interleaved post histories share the same numeric sequence. The
+    inbox ``unread_count`` for each thread must reflect the count of
+    msgs in *that* thread, never the gap in the project-wide numeric
+    sequence (which would include msgs from sibling threads).
+
+    Scenario:
+      - T-A opens at msg-001 (propose by alice)
+      - T-B opens at msg-002 (propose by alice)
+      - T-A posts msg-003, msg-004 (alice)
+      - T-B posts msg-005, msg-006, msg-007 (alice)
+
+      T-A has 3 msgs total (msg-001, msg-003, msg-004).
+      T-B has 4 msgs total (msg-002, msg-005, msg-006, msg-007).
+
+      For Bohr (never read either), the project-wide-numeric formula
+      would have reported T-A unread_count=4 and T-B unread_count=7 (a
+      total of 11, more than the 7 msgs in the project). The corrected
+      per-thread count must give 3 and 4.
+    """
+    await _open(client, "p", "T-A", owner="alice")
+    await _open(client, "p", "T-B", owner="alice")
+    await _post(client, "p", "T-A", type="report", author="alice", content="a-1")
+    await _post(client, "p", "T-A", type="report", author="alice", content="a-2")
+    await _post(client, "p", "T-B", type="report", author="alice", content="b-1")
+    await _post(client, "p", "T-B", type="report", author="alice", content="b-2")
+    await _post(client, "p", "T-B", type="report", author="alice", content="b-3")
+
+    code, body = await _unread(client, "p", "Bohr")
+    assert code == 200, body
+    assert body["total"] == 2
+
+    by_id = {it["thread_id"]: it for it in body["items"]}
+    assert by_id["T-A"]["unread_count"] == 3
+    assert by_id["T-A"]["latest_msg_id"] == "msg-004"
+    assert by_id["T-B"]["unread_count"] == 4
+    assert by_id["T-B"]["latest_msg_id"] == "msg-007"
+
+
+async def test_unread_count_with_cursor_in_interleaved_project(
+    client: AsyncClient,
+) -> None:
+    """Same interleaved setup, but Bohr has read partway into T-A.
+
+    Confirms the cursor comparison is also per-thread: advancing T-A's
+    cursor to msg-003 leaves only msg-004 unread there (1 msg, not the
+    numeric difference 7-3=4 the buggy formula would have given), and
+    T-B's cursor is untouched so T-B still shows 4 unread.
+    """
+    await _open(client, "p", "T-A", owner="alice")
+    await _open(client, "p", "T-B", owner="alice")
+    await _post(client, "p", "T-A", type="report", author="alice", content="a-1")  # msg-003
+    await _post(client, "p", "T-A", type="report", author="alice", content="a-2")  # msg-004
+    await _post(client, "p", "T-B", type="report", author="alice", content="b-1")  # msg-005
+    await _post(client, "p", "T-B", type="report", author="alice", content="b-2")  # msg-006
+    await _post(client, "p", "T-B", type="report", author="alice", content="b-3")  # msg-007
+
+    await _mark_read(
+        client, "p", "T-A",
+        identity_name="Bohr", up_to_msg_id="msg-003",
+    )
+
+    code, body = await _unread(client, "p", "Bohr")
+    assert code == 200
+    assert body["total"] == 2
+
+    by_id = {it["thread_id"]: it for it in body["items"]}
+    # T-A: cursor at msg-003, only msg-004 (also in T-A) is unread.
+    assert by_id["T-A"]["unread_count"] == 1
+    assert by_id["T-A"]["last_read_msg_id"] == "msg-003"
+    # T-B: no cursor; all 4 of its msgs are unread (msg-002, 005, 006, 007).
+    assert by_id["T-B"]["unread_count"] == 4
+    assert by_id["T-B"]["last_read_msg_id"] is None
+
+
 async def test_unread_excludes_resolved_by_default(client: AsyncClient) -> None:
     await _open(client, "p", "T-1")
     # Close the thread -- alice is the owner.
