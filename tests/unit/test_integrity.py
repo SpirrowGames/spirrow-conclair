@@ -84,3 +84,42 @@ def test_closes_thread_by_non_owner_raises() -> None:
         )
     assert ei.value.details["thread_owner"] == "alice"
     assert ei.value.details["author"] == "bob"
+
+
+# ADR-2026-06-04-19 D-5: owner_override relaxes ONLY the owner clause.
+
+
+def test_owner_override_allows_non_owner_decide() -> None:
+    # No exception — human force-close.
+    assert_closes_thread_rule(
+        thread=_thread(owner="alice", thread_id="T-1"),
+        msg_type="decide",
+        closes_thread="T-1",
+        author="human",
+        owner_override=True,
+    )
+
+
+def test_owner_override_still_enforces_decide_type() -> None:
+    # type='decide' invariant is NOT relaxed by owner_override.
+    with pytest.raises(ChatroomIntegrityError) as ei:
+        assert_closes_thread_rule(
+            thread=_thread(owner="alice", thread_id="T-1"),
+            msg_type="report",
+            closes_thread="T-1",
+            author="human",
+            owner_override=True,
+        )
+    assert ei.value.details["msg_type"] == "report"
+
+
+def test_owner_override_still_enforces_thread_id_match() -> None:
+    # closes_thread == thread_id invariant is NOT relaxed by owner_override.
+    with pytest.raises(ChatroomIntegrityError):
+        assert_closes_thread_rule(
+            thread=_thread(owner="alice", thread_id="T-1"),
+            msg_type="decide",
+            closes_thread="T-OTHER",
+            author="human",
+            owner_override=True,
+        )

@@ -55,6 +55,14 @@ class PostMessageRequest(BaseModel):
     # this msg. Conclair persists verbatim; Magickit validates against the
     # Prismind identity record's allowed_roles before forwarding.
     role: str | None = None
+    # ADR-2026-06-04-19 D-5: when true, skip the owner==author check for a
+    # closes_thread decide so a Tier-C human can force-close a non-owned
+    # thread. Conclair only honors the flag (no identity logic) — Magickit is
+    # the sole decision point and sets it iff the author is a human identity.
+    # The decision to relax the gate's review requirement is separate (that
+    # stays in Magickit); this flag relaxes ownership only.
+    owner_override: bool = False
+    owner_override_reason: str | None = None
 
 
 class PostMessageResponse(BaseModel):
@@ -81,6 +89,11 @@ class CloseThreadRequest(BaseModel):
     # stamped onto the internal decide msg. Conclair persists verbatim;
     # Magickit validates role × allowed_roles before forwarding.
     role: str | None = None
+    # ADR-2026-06-04-19 D-5: human (Tier-C) force-close of a non-owned thread.
+    # See CloseThreadRequest note above — Conclair only honors the flag;
+    # Magickit decides (human-only) and supplies the reason for the audit.
+    owner_override: bool = False
+    owner_override_reason: str | None = None
 
 
 class CloseThreadResponse(BaseModel):

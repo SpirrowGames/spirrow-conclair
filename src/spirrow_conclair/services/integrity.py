@@ -113,9 +113,15 @@ def assert_closes_thread_rule(
     msg_type: str,
     closes_thread: str | None,
     author: str,
+    owner_override: bool = False,
 ) -> None:
     """Invariant 3: a `closes_thread` value is only valid on a `decide` msg
     whose author matches the thread owner, and must reference its own thread.
+
+    ADR-2026-06-04-19 D-5: ``owner_override=True`` relaxes *only* the
+    ``author == thread.owner`` clause (human Tier-C force-close). The
+    ``type='decide'`` and ``closes_thread == thread_id`` invariants always
+    hold.
     """
     if closes_thread is None:
         return
@@ -136,7 +142,7 @@ def assert_closes_thread_rule(
             },
         )
 
-    if author != thread.owner:
+    if author != thread.owner and not owner_override:
         # Permission concept overlaps with integrity here, but this branch
         # is also catchable by services.permissions.assert_owner_can_close.
         # Keep it as IntegrityError so the dispatch is uniform when called
