@@ -48,6 +48,63 @@ async def test_non_owner_close_returns_403(client: AsyncClient) -> None:
     assert body["error_type"] == "ChatroomPermissionError"
 
 
+# ADR-2026-06-04-19 D-5: owner_override (human Tier-C force-close).
+
+
+async def test_owner_override_close_by_non_owner_succeeds(client: AsyncClient) -> None:
+    await _open(client, "T-1", owner="Bohr")
+    r = await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={
+            "summary_content": "force-close by Tier C",
+            "author": "human",
+            "owner_override": True,
+            "owner_override_reason": "deadlocked; Takahito decides",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["thread"]["status"] == "resolved"
+
+    # The force-close is recorded structurally in the audit log.
+    ev = await client.get(
+        "/v1/projects/p/events", params={"thread_id": "T-1", "action": "post_message"}
+    )
+    assert ev.status_code == 200
+    details = [e["details"] for e in ev.json()["items"]]
+    override_ev = [d for d in details if d.get("owner_override")]
+    assert override_ev, ev.text
+    assert override_ev[0]["thread_owner"] == "Bohr"
+    assert override_ev[0]["owner_override_reason"] == "deadlocked; Takahito decides"
+
+
+async def test_owner_override_absent_still_403_for_non_owner(client: AsyncClient) -> None:
+    await _open(client, "T-1", owner="Bohr")
+    r = await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={"summary_content": "x", "author": "human"},
+    )
+    assert r.status_code == 403
+    assert r.json()["error_type"] == "ChatroomPermissionError"
+
+
+async def test_owner_override_via_post_message_decide(client: AsyncClient) -> None:
+    """The decide+closes_thread post path honors owner_override too."""
+    await _open(client, "T-1", owner="Bohr")
+    r = await client.post(
+        "/v1/projects/p/threads/T-1/messages",
+        json={
+            "type": "decide",
+            "author": "human",
+            "content": "force-close via post",
+            "closes_thread": "T-1",
+            "owner_override": True,
+            "owner_override_reason": "Tier C",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["thread_status_changed_to"] == "resolved"
+
+
 async def test_close_unknown_thread_returns_404(client: AsyncClient) -> None:
     r = await client.post(
         "/v1/projects/p/threads/T-nope/close",

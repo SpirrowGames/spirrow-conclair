@@ -98,6 +98,7 @@ async def open_thread(
             closes_thread=None,
             tags=list(body.tags),
             embodiment=body.embodiment,
+            role=body.role,
         )
         event_orm = ChatroomEvent(
             project=project,
@@ -232,7 +233,9 @@ async def close_thread(
         )
         # Owner check first so non-owner attempts surface as 403 rather
         # than as the integrity 409 from assert_closes_thread_rule.
-        assert_owner_can_close(thread, body.author)
+        # ADR-2026-06-04-19 D-5: owner_override (human Tier-C force-close,
+        # gated by Magickit) skips the ownership clause only.
+        assert_owner_can_close(thread, body.author, owner_override=body.owner_override)
 
         # affects_threads is a thread-level field; patch it before
         # post_message_in_session so it's persisted in the same txn.
@@ -253,6 +256,9 @@ async def close_thread(
             commit_ref=body.commit_ref,
             timestamp=body.timestamp,
             embodiment=body.embodiment,
+            role=body.role,
+            owner_override=body.owner_override,
+            owner_override_reason=body.owner_override_reason,
         )
 
     return CloseThreadResponse(

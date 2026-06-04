@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Path, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,12 +46,21 @@ async def post_message_in_session(
     commit_ref: str | None = None,
     timestamp: datetime | None = None,
     embodiment: str | None = None,
+    role: str | None = None,
+    owner_override: bool = False,
+    owner_override_reason: str | None = None,
 ) -> tuple[Message, str | None]:
     """Insert a single message + status-transition event (if any).
 
     MUST be called inside an active transaction. Returns the new Message
     and the new thread.status if a transition occurred (else None). The
     `thread` arg is updated in-place to reflect the post-transition state.
+
+    ADR-2026-06-04-19 D-5: ``owner_override`` relaxes only the ownership
+    clause of the closes_thread rule. When it actually takes effect (the
+    author is not the owner), the post_message audit event records the
+    bypass (``owner_override`` / ``thread_owner`` / ``owner_override_reason``)
+    so "who force-closed whose thread, and why" is traceable.
     """
     references_threads = list(references_threads or [])
     related_tasks = list(related_tasks or [])
@@ -66,11 +75,15 @@ async def post_message_in_session(
         msg_type=msg_type,
         author=author,
     )
+    # owner_override only meaningfully bypasses when the author isn't the
+    # owner; capture that so the audit reflects an *actual* force-close.
+    owner_override_applied = bool(owner_override) and author != thread.owner
     integrity_svc.assert_closes_thread_rule(
         thread=thread,
         msg_type=msg_type,
         closes_thread=closes_thread,
         author=author,
+        owner_override=owner_override,
     )
     await integrity_svc.assert_reply_to_in_thread(
         session,
@@ -100,6 +113,7 @@ async def post_message_in_session(
         closes_thread=closes_thread,
         tags=tags,
         embodiment=embodiment,
+        role=role,
     )
     session.add(msg_orm)
     # Make the new msg visible to the status-transition event row insert
@@ -128,6 +142,11 @@ async def post_message_in_session(
             )
         )
 
+    post_details: dict[str, Any] = {"type": msg_type}
+    if owner_override_applied:
+        post_details["owner_override"] = True
+        post_details["thread_owner"] = thread.owner
+        post_details["owner_override_reason"] = owner_override_reason
     session.add(
         ChatroomEvent(
             project=project,
@@ -136,7 +155,7 @@ async def post_message_in_session(
             action="post_message",
             thread_id=thread.thread_id,
             msg_id=msg_id,
-            details={"type": msg_type},
+            details=post_details,
         )
     )
 
@@ -174,6 +193,9 @@ async def post_message(
             commit_ref=body.commit_ref,
             timestamp=body.timestamp,
             embodiment=body.embodiment,
+            role=body.role,
+            owner_override=body.owner_override,
+            owner_override_reason=body.owner_override_reason,
         )
 
     return PostMessageResponse(

@@ -42,3 +42,21 @@ def test_empty_author_treated_as_non_owner() -> None:
 def test_owner_match_is_case_sensitive() -> None:
     with pytest.raises(ChatroomPermissionError):
         assert_owner_can_close(_thread("alice"), "Alice")
+
+
+# ADR-2026-06-04-19 D-5: owner_override skips the ownership clause.
+
+
+def test_owner_override_allows_non_owner() -> None:
+    # No exception: a force-close (Magickit set this only for a human).
+    assert_owner_can_close(_thread("alice"), "human", owner_override=True)
+
+
+def test_owner_override_false_still_enforces() -> None:
+    with pytest.raises(ChatroomPermissionError):
+        assert_owner_can_close(_thread("alice"), "human", owner_override=False)
+
+
+def test_owner_override_noop_for_actual_owner() -> None:
+    # Harmless when the author *is* the owner (Magickit sets it for all humans).
+    assert_owner_can_close(_thread("alice"), "alice", owner_override=True)
