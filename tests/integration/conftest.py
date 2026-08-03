@@ -95,7 +95,8 @@ async def _clean_tables(
         await session.execute(
             text(
                 "TRUNCATE actor_read_cursors, chatroom_events, messages, "
-                "threads RESTART IDENTITY CASCADE"
+                "threads, project_control, project_control_history "
+                "RESTART IDENTITY CASCADE"
             )
         )
         await session.commit()

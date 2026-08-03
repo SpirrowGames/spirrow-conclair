@@ -11,7 +11,7 @@ returns empty), so this matters mostly for `get_thread` not-found.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
@@ -21,6 +21,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from spirrow_conclair import __version__
+from spirrow_conclair.api.control import (
+    get_control as api_get_control,
+    get_control_history as api_get_control_history,
+    set_control as api_set_control,
+)
 from spirrow_conclair.api.events import list_events as api_list_events
 from spirrow_conclair.api.integrity import check_integrity as api_check_integrity
 from spirrow_conclair.api.messages import post_message as api_post_message
@@ -36,6 +41,7 @@ from spirrow_conclair.schemas import (
     CloseThreadRequest,
     OpenThreadRequest,
     PostMessageRequest,
+    SetControlRequest,
     ThreadStatus,
 )
 from spirrow_conclair.web.deps import get_templates
@@ -100,6 +106,127 @@ async def landing(request: Request) -> HTMLResponse:
 
 
 # ---------------------------------------------------------------------------
+# Loop control (HOLD / RESUME)
+# ---------------------------------------------------------------------------
+#
+# The widget lives at the top of the thread list page: that route already
+# carries the project scope, and it is the screen a human is on when they
+# decide to stop something.
+#
+# One template renders the widget for all three entry points (page
+# include, 7s poll, button post), so "what the widget looks like" has a
+# single definition. Errors render *inside* it rather than replacing it —
+# swapping a flash partial over the widget would take the buttons and the
+# poll trigger off the page, leaving no way to retry.
+
+#: How long observed_at may go unrefreshed before the widget says the
+#: loop might be down. Long enough to sit through an implementation turn,
+#: short enough to notice a sweep that never started.
+CONTROL_STALE_MINUTES = 15
+
+
+async def _control_ctx(
+    project: str,
+    session: SessionDep,
+    *,
+    flash_error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    control = await api_get_control(project=project, session=session)
+    history = await api_get_control_history(project=project, session=session, limit=3)
+
+    # "Pending" only makes sense against a setting someone actually made.
+    # An unconfigured project is running on the default; there is nothing
+    # for the loop to catch up to, even though observed_state is null.
+    diverged = control.configured and control.observed_state != control.desired_state
+
+    stale = False
+    if control.observed_at is not None:
+        observed_at = control.observed_at
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - observed_at).total_seconds()
+        stale = age > CONTROL_STALE_MINUTES * 60
+
+    return {
+        "project": project,
+        "control": control,
+        "history": history,
+        "diverged": diverged,
+        "stale": stale,
+        "stale_minutes": CONTROL_STALE_MINUTES,
+        "flash_error": flash_error,
+    }
+
+
+@router.get(
+    "/projects/{project}/control/_widget",
+    response_class=HTMLResponse,
+    summary="Loop control widget partial (HTMX polling target)",
+)
+async def control_widget_fragment(
+    request: Request,
+    project: ProjectPath,
+    session: SessionDep,
+) -> HTMLResponse:
+    return _render(
+        request,
+        "partials/control_widget.html",
+        await _control_ctx(project, session),
+    )
+
+
+@router.post(
+    "/projects/{project}/control",
+    response_class=HTMLResponse,
+    summary="Set the desired loop control state (form post)",
+)
+async def control_set(
+    request: Request,
+    project: ProjectPath,
+    session: SessionDep,
+    state: Annotated[str, Form()],
+    # conclair.js injects the navbar's author into every HTMX request as
+    # `author`, so the widget needs no field of its own. It lands in
+    # `actor` because that is what the record is: who says they did this.
+    author: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    try:
+        body = SetControlRequest(state=state, actor=author)  # type: ignore[arg-type]
+    except ValidationError:
+        # Both failure modes are the operator's, and both are fixable
+        # from this screen, so they get one sentence rather than a
+        # pydantic dump: an unknown state can only come from a tampered
+        # request, and a blank actor means the navbar field is empty.
+        detail = (
+            f"未知の state '{state}' です。"
+            if state not in ("run", "supervised", "hold")
+            else "author を入れてください (navbar 右上)。"
+        )
+        ctx = await _control_ctx(
+            project,
+            session,
+            flash_error={"error_type": "ValidationError", "error": detail},
+        )
+        return _render(request, "partials/control_widget.html", ctx)
+
+    try:
+        await api_set_control(project=project, body=body, session=session)
+    except ChatroomError as e:
+        ctx = await _control_ctx(
+            project,
+            session,
+            flash_error={"error_type": type(e).__name__, "error": e.message},
+        )
+        return _render(request, "partials/control_widget.html", ctx)
+
+    return _render(
+        request,
+        "partials/control_widget.html",
+        await _control_ctx(project, session),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Threads — list + detail
 # ---------------------------------------------------------------------------
 
@@ -145,6 +272,10 @@ async def threads_page(
             "filter_offset": offset,
         }
     )
+    # The control widget is part of this page's first paint rather than a
+    # post-load fetch: an operator arriving to stop something should see
+    # the current state immediately, not a blank box for one poll cycle.
+    ctx.update(await _control_ctx(project, session))
     return _render(request, "thread_list.html", ctx)
 
 

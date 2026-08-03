@@ -51,7 +51,8 @@ src/spirrow_conclair/
 │   ├── __init__.py      # Base + re-export
 │   ├── thread.py        # Thread (status CHECK 制約付き)
 │   ├── message.py       # Message (composite FK to threads, type CHECK)
-│   └── event.py         # ChatroomEvent (audit log, append-only)
+│   ├── event.py         # ChatroomEvent (audit log, append-only)
+│   └── project_control.py # ProjectControl (desired/observed) + History
 ├── schemas/             # pydantic request/response
 │   ├── __init__.py      # forward-ref resolution (model_rebuild)
 │   ├── thread.py
@@ -68,7 +69,8 @@ src/spirrow_conclair/
 │   ├── threads.py            # POST/GET /threads, /close, /threads/{id}
 │   ├── messages.py           # POST /threads/{id}/messages + post_message_in_session
 │   ├── events.py             # GET /events
-│   └── integrity.py          # GET /integrity (audit report)
+│   ├── integrity.py          # GET /integrity (audit report)
+│   └── control.py            # loop control (HOLD/RESUME) desired/observed
 ├── web/                 # /ui routes (Jinja2 + HTMX, T15-T17)
 │   ├── __init__.py      # ui_router export
 │   ├── routes.py        # page + fragment + form-post endpoints
@@ -91,7 +93,11 @@ src/spirrow_conclair/
 alembic/                 # migration
 ├── env.py               # async-aware, DATABASE_URL を Settings から取得
 └── versions/
-    └── 0001_initial.py
+    ├── 0001_initial.py
+    ├── 0002_messages_embodiment.py
+    ├── 0003_actor_read_cursors.py
+    ├── 0004_messages_role.py
+    └── 0005_project_control.py
 
 docs/
 ├── api-design.md        # HTTP API 詳細仕様 (T02)
@@ -103,8 +109,7 @@ scripts/
 └── restore.sh           # snapshot から DB 復元
 tests/
 ├── unit/                # 100 cases (services の pure 部分)
-└── integration/         # 54 cases (testcontainers postgres + httpx ASGITransport)
-                         #   30 v1 API + 24 UI smoke
+└── integration/         # 116 cases (testcontainers postgres + httpx ASGITransport)
 ```
 
 ## API レイヤ (`/v1` JSON)
@@ -121,6 +126,25 @@ tests/
 | `GET /v1/projects/{p}/threads/{tid}` | thread + msgs (mode=full|summary) |
 | `GET /v1/projects/{p}/events` | audit log (action / thread_id / since/until filter) |
 | `GET /v1/projects/{p}/integrity` | invariant audit report (常に 200) |
+| `GET /v1/projects/{p}/control` | loop 制御状態 (**常に 200**。未設定は `configured:false` + 既定 `run`) |
+| `PUT /v1/projects/{p}/control` | **desired** の設定 (操作者のみ)。履歴に 1 行追加 |
+| `POST /v1/projects/{p}/control/observed` | **observed** の報告 (ループのみ)。`desired_*` を触らない |
+| `GET /v1/projects/{p}/control/history` | desired 変更履歴 (newest first, 既定 20) |
+
+### loop control (HOLD / RESUME)
+
+プロジェクト単位の 3 値状態 `run` / `supervised` / `hold`。**未設定は `run`** (既定で自律)。
+`desired` (操作者が設定) と `observed` (ループが実際に読んだ値) を別カラムで保持し、UI は両方出す —
+ボタンを押しても効くのはループが次に読んだ時なので、即時停止を約束しないため。
+
+書き手の分離は endpoint 境界で行う: `PUT` は desired のみ、`POST /observed` は observed のみを書く。
+ループが desired を書けると「止めたのに勝手に再開していた」が起こる。
+
+`GET` が 404 を返さないのは意図的。呼び出し側 (mindwire) は**取得失敗を `hold` として扱う**契約なので、
+「未設定」と「読めなかった」が同じ応答になると全プロジェクトが停止する。
+
+認証はしない。tailnet が信頼境界であり、`actor` は監査記録であって認証ではない
+(既存の `_is_human` と同じ立場)。
 
 エラー envelope: `{error_type, error, details?}` 統一。HTTP code は `error_type` ベースで決定 (`api/error_handlers.py`)。
 
@@ -140,6 +164,13 @@ tests/
 | `POST /ui/projects/{p}/threads` | open_thread form (success → `HX-Redirect`) |
 | `POST /ui/projects/{p}/threads/{tid}/messages` | post_message form (success → `HX-Trigger: messagePosted`) |
 | `POST /ui/projects/{p}/threads/{tid}/close` | close_thread form (success → `HX-Refresh: true`) |
+| `GET /ui/projects/{p}/control/_widget` | loop control ウィジェット partial (7s polling) |
+| `POST /ui/projects/{p}/control` | desired 設定 (form: `state` + `author`)。常にウィジェットを返す |
+
+loop control ウィジェットは thread 一覧 page の**上部**に置き、`partials/control_widget.html` 1 枚が
+page 埋め込み・poll・button post の 3 経路すべてを描く。エラーは flash に差し替えるのではなく
+**ウィジェットの内側**に出す — flash で上書きするとボタンと poll trigger ごと消えて再試行できなくなるため。
+`actor` は navbar の author-input を `conclair.js` が `author` として全 HTMX リクエストに注入する経路を再利用する。
 
 `ChatroomError` / `pydantic.ValidationError` はいずれも 200 + `partials/flash.html` で inline 表示 (HTMX swap が必ず発火するため)。詳細は `docs/usage-cheatsheet.md` の「UI 経由」セクション。
 
@@ -187,17 +218,20 @@ tests/unit/        # 100 cases (services の pure 部分)
   test_integrity.py            # assert_closes_thread_rule
   test_exceptions.py           # 階層 + details propagation
 
-tests/integration/ # 54 cases, testcontainers postgres:16
+tests/integration/ # 116 cases, testcontainers postgres:16
   conftest.py              # postgres container + alembic + fixtures
   test_api_threads.py      # open / list / get e2e
   test_api_messages.py     # post + transitions + concurrent allocator
   test_api_close.py        # close shortcut + permission + state
   test_api_events.py       # audit log filter
   test_api_integrity.py    # injection + project scope
-  test_ui_routes.py        # /ui page + fragment + form post smoke (24)
+  test_api_control.py      # loop control: 既定値 / 422 / 履歴 / INV-4 回帰
+  test_migration_control.py # 0005 の up/down/up (捨てDBで実行)
+  test_ui_routes.py        # /ui page + fragment + form post smoke
+  test_ui_control.py       # control ウィジェット: 反映待ち / stale / 拒否
 ```
 
-合計 154 cases / coverage 78%。
+合計 227 cases (unit 111 + integration 116)。
 
 実行: `.venv/bin/pytest tests/` (両方) / `pytest tests/unit/` (高速のみ) / `pytest tests/integration/` (DB 必要)。
 

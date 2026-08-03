@@ -28,6 +28,11 @@
     --status-superseded: #9aa0a6;
     --status-parked: #9aa0a6;
 
+    --control-run: #9ece6a;
+    --control-supervised: #e0af68;
+    --control-hold: #f7768e;
+    --bg-hold: #2a1c22;
+
     --radius: 6px;
     --gap: 12px;
     --gap-lg: 24px;
@@ -366,3 +371,83 @@ details[open] > summary { margin-bottom: 8px; }
 .row > * { flex: 1; min-width: 0; }
 .spacer { height: var(--gap); }
 .text-right { text-align: right; }
+
+/* loop control widget (HOLD / RESUME) */
+.control-widget { border-left: 3px solid var(--border); }
+.control-widget.control-run { border-left-color: var(--control-run); }
+.control-widget.control-supervised { border-left-color: var(--control-supervised); }
+/* HOLD is the state you must not mistake for any other: tint the whole
+   card, not just the selected button. */
+.control-widget.control-hold {
+    border-left-color: var(--control-hold);
+    background: var(--bg-hold);
+}
+
+.control-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--gap);
+    flex-wrap: wrap;
+}
+.control-title { margin: 0; font-size: 15px; }
+.control-scope { font-size: 12px; }
+
+.control-segment {
+    display: flex;
+    gap: 0;
+    margin: 12px 0;
+    flex-wrap: wrap;
+}
+.control-btn {
+    padding: 6px 18px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    cursor: pointer;
+}
+.control-btn:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+.control-btn:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+.control-btn + .control-btn { border-left: none; }
+.control-btn:hover { color: var(--text); background: var(--bg-card); }
+.control-btn.is-selected { color: var(--bg); }
+.control-btn-run.is-selected {
+    background: var(--control-run);
+    border-color: var(--control-run);
+}
+.control-btn-supervised.is-selected {
+    background: var(--control-supervised);
+    border-color: var(--control-supervised);
+}
+.control-btn-hold.is-selected {
+    background: var(--control-hold);
+    border-color: var(--control-hold);
+}
+
+.control-line { margin: 4px 0; font-size: 13px; }
+.control-state { font-weight: 700; }
+.control-state-run { color: var(--control-run); }
+.control-state-supervised { color: var(--control-supervised); }
+.control-state-hold { color: var(--control-hold); }
+
+.control-alert { margin: 8px 0; }
+
+.control-note {
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-radius: var(--radius);
+    background: var(--bg-elev);
+    color: var(--text-muted);
+}
+.control-note-pending { color: var(--warning); }
+.control-note-stale { color: var(--danger); }
+.control-note-trust { background: none; padding: 6px 0 0; }
+
+.control-history { margin-top: 12px; font-size: 12px; }
+.control-history-list { margin: 6px 0 0; padding-left: 18px; }
+.control-history-list li { margin: 2px 0; }
+.control-history-note { color: var(--text-muted); }

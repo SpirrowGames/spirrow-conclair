@@ -1,0 +1,97 @@
+{#
+  Loop control widget. Rendered both as the initial include on the thread
+  list page and as the HTMX swap target (outerHTML) for the 7s poll and
+  for the button posts, so this file is the single definition of the
+  widget's markup.
+#}
+<section id="control-widget"
+         class="card control-widget control-{{ control.desired_state }}"
+         hx-get="/ui/projects/{{ project }}/control/_widget"
+         hx-trigger="every 7s"
+         hx-target="this"
+         hx-swap="outerHTML">
+
+    <div class="control-head">
+        <h2 class="control-title">loop control</h2>
+        <span class="control-scope muted">project: <strong>{{ project }}</strong></span>
+    </div>
+
+    <div class="control-segment" role="group" aria-label="loop control state">
+        {% for s, label, desc in [
+            ("run",        "RUN",        "完全自律 — independent naysayer の proceed で implementer まで進む"),
+            ("supervised", "SUPERVISED", "設計ループのみ — human decide / PR-gate REQUEST_CHANGES だけがコードに到達"),
+            ("hold",       "HOLD",       "停止 — sweep は起動せず、実行中の conductor は次のラウンド境界で止まる")
+        ] %}
+        <button type="button"
+                class="control-btn control-btn-{{ s }}{% if control.desired_state == s %} is-selected{% endif %}"
+                title="{{ desc }}"
+                {% if control.desired_state == s %}aria-pressed="true"{% else %}aria-pressed="false"{% endif %}
+                hx-post="/ui/projects/{{ project }}/control"
+                hx-vals='{"state": "{{ s }}"}'
+                hx-target="#control-widget"
+                hx-swap="outerHTML">{{ label }}</button>
+        {% endfor %}
+    </div>
+
+    {% if flash_error %}
+    <div class="alert alert-error control-alert">
+        <strong>{{ flash_error.error_type }}</strong>: {{ flash_error.error }}
+    </div>
+    {% endif %}
+
+    <p class="control-line">
+        設定:
+        <strong class="control-state control-state-{{ control.desired_state }}">{{ control.desired_state | upper }}</strong>
+        {% if control.configured %}
+        <span class="muted">({{ control.desired_actor }}, {{ control.desired_at | ago }})</span>
+        {% else %}
+        <span class="muted">(未設定 — 既定値)</span>
+        {% endif %}
+    </p>
+
+    <p class="control-line">
+        ループが最後に見た値:
+        {% if control.observed_state %}
+        <strong class="control-state control-state-{{ control.observed_state }}">{{ control.observed_state | upper }}</strong>
+        <span class="muted">({{ control.observed_actor }}, {{ control.observed_at | ago }})</span>
+        {% else %}
+        <span class="muted">まだ報告なし</span>
+        {% endif %}
+    </p>
+
+    {% if diverged %}
+    <p class="control-note control-note-pending">
+        反映待ち — この設定はループが次に読んだ時に効きます。
+        実行中のターンは完了するため即時ではありません。
+    </p>
+    {% endif %}
+
+    {% if stale %}
+    <p class="control-note control-note-stale">
+        observed が {{ stale_minutes }} 分以上更新されていません。ループが動いていない可能性があります
+        （これは推測です。ループが単に長いターンの途中である場合もこう見えます）。
+    </p>
+    {% endif %}
+
+    <details class="control-history">
+        <summary class="muted">直近の変更履歴</summary>
+        {% if history.items %}
+        <ul class="control-history-list">
+            {% for h in history.items %}
+            <li>
+                <span class="control-state control-state-{{ h.state }}">{{ h.state | upper }}</span>
+                <span class="muted">← {{ h.actor }} / {{ h.changed_at | iso }}</span>
+                {% if h.note %}<span class="control-history-note">{{ h.note }}</span>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted empty-state">変更履歴なし</p>
+        {% endif %}
+    </details>
+
+    <p class="control-note control-note-trust">
+        actor は <strong>記録であって認証ではありません</strong>。
+        tailnet に到達できる者は誰でもこの値を変更できます。
+    </p>
+</section>
