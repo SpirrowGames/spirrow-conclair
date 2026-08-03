@@ -1,15 +1,18 @@
+{# `data-label` is what the stacked (phone) layout puts in front of each cell
+   -- see `.table-stack` in conclair.css. Each one must match the <th> in
+   thread_list.html: they are the same column, named twice. #}
 {% if result.items %}
     {% for t in result.items %}
     <tr>
-        <td>
+        <td data-label="thread_id">
             <a href="/ui/projects/{{ project }}/threads/{{ t.thread_id }}">
                 <code>{{ t.thread_id }}</code>
             </a>
         </td>
-        <td>{{ t.title }}</td>
-        <td><span class="status status-{{ t.status }}">{{ t.status }}</span></td>
-        <td>{{ t.owner }}</td>
-        <td>
+        <td data-label="title">{{ t.title }}</td>
+        <td data-label="status"><span class="status status-{{ t.status }}">{{ t.status }}</span></td>
+        <td data-label="owner">{{ t.owner }}</td>
+        <td data-label="tags">
             {# tags carry the gate markers (e.g. gate:naysayer), so a thread
                waiting on a review is legible from the list instead of only
                after opening it. #}
@@ -19,10 +22,12 @@
             <span class="muted">—</span>
             {% endfor %}
         </td>
-        <td>{{ t.created_at | iso }}</td>
+        <td data-label="created">{{ t.created_at | iso }}</td>
     </tr>
     {% endfor %}
 {% else %}
+    {# No data-label: the stacked layout drops the label slot for cells that
+       have no column of their own. #}
     <tr>
         <td colspan="6" class="muted">no threads match these filters</td>
     </tr>

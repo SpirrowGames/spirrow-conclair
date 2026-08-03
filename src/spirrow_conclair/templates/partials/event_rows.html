@@ -1,17 +1,19 @@
+{# `data-label` feeds the stacked (phone) layout; keep each matching the <th>
+   in events.html. See `.table-stack` in conclair.css. #}
 {% if result.items %}
     {% for e in result.items %}
     <tr>
-        <td>{{ e.timestamp | iso }}</td>
-        <td><span class="badge">{{ e.action }}</span></td>
-        <td>{{ e.actor }}</td>
-        <td>
+        <td data-label="timestamp">{{ e.timestamp | iso }}</td>
+        <td data-label="action"><span class="badge">{{ e.action }}</span></td>
+        <td data-label="actor">{{ e.actor }}</td>
+        <td data-label="thread_id">
             {% if e.thread_id %}
             <a href="/ui/projects/{{ project }}/threads/{{ e.thread_id }}">
                 <code>{{ e.thread_id }}</code>
             </a>
             {% endif %}
         </td>
-        <td>{% if e.msg_id %}<code>{{ e.msg_id }}</code>{% endif %}</td>
+        <td data-label="msg_id">{% if e.msg_id %}<code>{{ e.msg_id }}</code>{% endif %}</td>
     </tr>
     {% endfor %}
 {% else %}

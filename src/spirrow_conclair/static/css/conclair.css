@@ -451,3 +451,175 @@ details[open] > summary { margin-bottom: 8px; }
 .control-history-list { margin: 6px 0 0; padding-left: 18px; }
 .control-history-list li { margin: 2px 0; }
 .control-history-note { color: var(--text-muted); }
+
+/* ==========================================================================
+   Small screens
+   ==========================================================================
+   Everything above is the desktop layout. This is the only block that knows
+   about narrow viewports, so "what changes on a phone" is answerable by
+   reading one place.
+
+   768px matches the breakpoint Magickit's dashboard already uses. The two
+   UIs sit behind one origin and get navigated between, so a shared cutover
+   width keeps them from reflowing at different moments on the same device.
+   ========================================================================== */
+
+@media (max-width: 768px) {
+    /* The navbar is 5 things in a row at desktop width. On a phone the
+       brand and the author field stay on the first line (author is what
+       you must set before you can post) and the links wrap to their own
+       scrollable line rather than shrinking to unhittable targets. */
+    .navbar {
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        padding: 8px 12px;
+    }
+    .nav-brand a { font-size: 16px; }
+    .nav-links {
+        order: 3;
+        width: 100%;
+        gap: 4px;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        /* The scrollbar would eat a line of its own on some Androids. */
+        scrollbar-width: none;
+    }
+    .nav-links::-webkit-scrollbar { display: none; }
+    .nav-links a {
+        white-space: nowrap;
+        padding: 8px 10px;
+    }
+    /* The project is in the page heading a few lines below; repeating it
+       in a wrapped navbar costs a line and says nothing new. */
+    .nav-project { display: none; }
+    .nav-user {
+        margin-left: auto;
+        gap: 6px;
+    }
+    #author-input {
+        width: 120px;
+        padding: 8px;
+    }
+
+    .container {
+        margin: 12px auto;
+        padding: 0 12px;
+        gap: 16px;
+    }
+    .card { padding: 14px; }
+    .card h1 { font-size: 20px; }
+    .card h2 { font-size: 16px; }
+    .footer { margin: 24px 0 16px; }
+
+    /* 16px is the threshold below which iOS Safari zooms the page on
+       focus, and it does not zoom back out. Everything typed into on a
+       phone has to clear it. */
+    input[type="text"], input[type="number"], select, textarea {
+        font-size: 16px;
+        padding: 8px 10px;
+    }
+    textarea { min-height: 110px; }
+
+    /* Fingers, not cursors. */
+    .btn {
+        padding: 10px 16px;
+        font-size: 14px;
+        min-height: 40px;
+    }
+    .btn-sm {
+        padding: 6px 12px;
+        font-size: 13px;
+        min-height: 32px;
+    }
+
+    /* Side-by-side fields have nowhere to go at this width. */
+    .row { flex-direction: column; }
+    .inline-form { flex-wrap: wrap; }
+    .inline-form input { flex: 1 1 100%; }
+
+    .filter-form { gap: 8px; }
+    .filter-form label { width: 100%; }
+    .filter-form input,
+    .filter-form select { width: 100%; }
+    .filter-form select[multiple] {
+        min-width: 0;
+        height: 120px;
+    }
+
+    /* Tables that were not converted to the stacked form still have to
+       stop the page itself from scrolling sideways. */
+    .table:not(.table-stack) {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+
+    .msg { padding: 10px 12px; }
+    .msg-header { flex-wrap: wrap; gap: 6px 10px; }
+    pre { padding: 10px; font-size: 12px; }
+
+    /* Loop control: three buttons that must stay one tap each, so the
+       segment becomes equal thirds of the full width instead of wrapping
+       into a shape where the rounded ends land mid-row. */
+    .control-head { flex-direction: column; align-items: flex-start; gap: 2px; }
+    .control-segment {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        margin: 10px 0;
+    }
+    .control-btn {
+        padding: 12px 4px;
+        min-height: 44px;
+    }
+    .control-line { font-size: 12px; }
+}
+
+/* Stacked tables ----------------------------------------------------------
+   A row becomes a card and each cell carries its own label, so a six-column
+   thread list reads down the screen instead of sideways off it. The labels
+   live in `data-label` on the cell rather than being repeated in CSS: the
+   header text and the cell label are then one string in one file, and a
+   column added to the markup cannot silently get the wrong label.
+
+   Opt-in via `.table-stack` -- dense diagnostic tables are better left
+   scrolling, where lining values up column-wise is the point. */
+@media (max-width: 768px) {
+    .table-stack,
+    .table-stack tbody,
+    .table-stack tr,
+    .table-stack td {
+        display: block;
+        width: 100%;
+    }
+    .table-stack thead { display: none; }
+    .table-stack tr {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 8px 12px;
+        margin-bottom: 10px;
+    }
+    .table-stack td {
+        border: none;
+        padding: 3px 0;
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+    }
+    .table-stack td::before {
+        content: attr(data-label);
+        flex: 0 0 82px;
+        color: var(--text-muted);
+        font-size: 11px;
+        text-transform: lowercase;
+    }
+    /* The empty-state row is a single colspan cell with nothing to label. */
+    .table-stack td:not([data-label])::before { display: none; }
+    /* A cell can hold a JSON blob or an unbroken thread id. With the label
+       holding a fixed 82px, the remainder has to be allowed to wrap or it
+       pushes the card past the viewport and brings the page with it. */
+    .table-stack td > * {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+}
