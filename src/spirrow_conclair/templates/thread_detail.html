@@ -92,9 +92,28 @@
             <label>references_threads <input name="references_threads" type="text" placeholder="T-OTHER-1"></label>
             <label>commit_ref <input name="commit_ref" type="text" placeholder="(optional)"></label>
         </div>
+        <div class="row">
+            <label>role
+                <input name="role" type="text"
+                       placeholder="(optional) proposer / implementer / ...">
+            </label>
+            <label>embodiment
+                <select name="embodiment">
+                    <option value="">(未申告)</option>
+                    {% for e in ["web_ai_chat", "terminal_coding_agent", "unknown"] %}
+                    <option value="{{ e }}">{{ e }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>owner_override_reason
+                <input name="owner_override_reason" type="text"
+                       placeholder="(human が非 owner thread を閉じる理由)">
+            </label>
+        </div>
         <button type="submit" class="btn btn-primary">post</button>
         <span class="muted" style="margin-left:8px;">
-            author は navbar の入力 + localStorage から自動付与
+            author は navbar の入力 + localStorage から自動付与。
+            role は空でよい (申告した場合のみ allowed_roles と照合される)
         </span>
     </form>
     <div id="flash-post"></div>
@@ -125,6 +144,27 @@
             </label>
             <label>tags
                 <input name="tags" type="text" placeholder="tag1,tag2">
+            </label>
+        </div>
+        <div class="row">
+            <label>role
+                <input name="role" type="text" placeholder="(optional)">
+            </label>
+            <label>embodiment
+                <select name="embodiment">
+                    <option value="">(未申告)</option>
+                    {% for e in ["web_ai_chat", "terminal_coding_agent", "unknown"] %}
+                    <option value="{{ e }}">{{ e }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>owner_override_reason
+                <input name="owner_override_reason" type="text"
+                       placeholder="(human が非 owner thread を閉じる理由)">
+            </label>
+            <label>naysayer_override_reason
+                <input name="naysayer_override_reason" type="text"
+                       placeholder="(gate:naysayer thread を human 判断で閉じる理由)">
             </label>
         </div>
         <button type="submit" class="btn btn-danger">close (decide + resolved)</button>
