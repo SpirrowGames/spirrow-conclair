@@ -475,6 +475,12 @@ details[open] > summary { margin-bottom: 8px; }
         padding: 8px 12px;
     }
     .nav-brand a { font-size: 16px; }
+    /* A single unbreakable token -- a long thread id, a URL, a JSON dump --
+       must not be able to set the page width and take everything else
+       sideways with it. `break-word` only breaks strings that would
+       overflow on their own, so ordinary prose is unaffected. */
+    body { overflow-wrap: break-word; }
+
     .nav-links {
         order: 3;
         width: 100%;
@@ -483,6 +489,12 @@ details[open] > summary { margin-bottom: 8px; }
         -webkit-overflow-scrolling: touch;
         /* The scrollbar would eat a line of its own on some Androids. */
         scrollbar-width: none;
+        /* Flex items default to `min-width: auto`, which means "never
+           shrink below your content". Without this the overflow-x above
+           does nothing: the row grows to fit the links instead of
+           scrolling them, and drags the document out to ~590px. */
+        min-width: 0;
+        flex-basis: 100%;
     }
     .nav-links::-webkit-scrollbar { display: none; }
     .nav-links a {
@@ -604,7 +616,20 @@ details[open] > summary { margin-bottom: 8px; }
         padding: 3px 0;
         display: flex;
         align-items: baseline;
-        gap: 10px;
+        /* A cell can hold several siblings -- the tags cell holds one span
+           per tag, each `white-space: nowrap`. Flex does not wrap by
+           default, so without this they stay on one line no matter how
+           many there are, and no amount of overflow-wrap helps: nowrap
+           text has no break opportunity to find. */
+        flex-wrap: wrap;
+        gap: 2px 10px;
+        /* `anywhere`, not `break-word`. Only `anywhere` shrinks the
+           min-content width, and min-content is what a flex item refuses
+           to go below -- a long thread id in a plain text cell would
+           otherwise hold the row open and push the page sideways. It has
+           to sit on the cell so the anonymous flex item wrapping a bare
+           text node inherits it; that item cannot be selected. */
+        overflow-wrap: anywhere;
     }
     .table-stack td::before {
         content: attr(data-label);
@@ -615,11 +640,7 @@ details[open] > summary { margin-bottom: 8px; }
     }
     /* The empty-state row is a single colspan cell with nothing to label. */
     .table-stack td:not([data-label])::before { display: none; }
-    /* A cell can hold a JSON blob or an unbroken thread id. With the label
-       holding a fixed 82px, the remainder has to be allowed to wrap or it
-       pushes the card past the viewport and brings the page with it. */
-    .table-stack td > * {
-        min-width: 0;
-        overflow-wrap: anywhere;
-    }
+    /* Element children need the flex-item escape hatch as well: `min-width`
+       defaults to `auto` there too. */
+    .table-stack td > * { min-width: 0; }
 }
