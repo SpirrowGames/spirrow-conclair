@@ -21,6 +21,10 @@ from spirrow_conclair.schemas.message import (
     PostMessageRequest,
     PostMessageResponse,
 )
+from spirrow_conclair.schemas.project import (
+    ProjectSummary,
+    ProjectSummaryListResponse,
+)
 from spirrow_conclair.schemas.read_cursor import (
     MarkReadRequest,
     MarkReadResponse,
@@ -56,6 +60,8 @@ __all__ = [
     "OpenThreadResponse",
     "PostMessageRequest",
     "PostMessageResponse",
+    "ProjectSummary",
+    "ProjectSummaryListResponse",
     "Thread",
     "ThreadListResponse",
     "ThreadStatus",

@@ -9,11 +9,21 @@
         <td>{{ t.title }}</td>
         <td><span class="status status-{{ t.status }}">{{ t.status }}</span></td>
         <td>{{ t.owner }}</td>
+        <td>
+            {# tags carry the gate markers (e.g. gate:naysayer), so a thread
+               waiting on a review is legible from the list instead of only
+               after opening it. #}
+            {% for tag in t.tags %}
+            <span class="tag{% if tag.startswith("gate:") %} tag-gate{% endif %}">{{ tag }}</span>
+            {% else %}
+            <span class="muted">—</span>
+            {% endfor %}
+        </td>
         <td>{{ t.created_at | iso }}</td>
     </tr>
     {% endfor %}
 {% else %}
     <tr>
-        <td colspan="5" class="muted">no threads match these filters</td>
+        <td colspan="6" class="muted">no threads match these filters</td>
     </tr>
 {% endif %}

@@ -251,6 +251,24 @@ textarea {
 .status-superseded { color: var(--status-superseded); }
 .status-parked { color: var(--status-parked); }
 
+/* thread tags */
+.tag {
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 2px 2px 0;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+/* A gate tag means the thread is blocked on someone else's review, which is
+   the one tag worth spotting without reading. */
+.tag-gate {
+    color: var(--status-awaiting_reply);
+    border-color: var(--status-awaiting_reply);
+    font-weight: 600;
+}
+
 /* messages */
 .msg {
     border: 1px solid var(--border);

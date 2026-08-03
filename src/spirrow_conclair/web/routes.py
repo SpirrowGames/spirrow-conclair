@@ -410,6 +410,44 @@ def _validation_flash(request: Request, err: ValidationError) -> HTMLResponse:
     )
 
 
+# Claims these handlers are structurally unable to honour. `role` is only
+# meaningful once it has been checked against the identity's `allowed_roles`,
+# and the two override flags only once the author has been confirmed human --
+# all of which lives in Magickit, which owns identity. Conclair validates
+# nothing by design.
+_GATED_CLAIM_FIELDS = ("role", "owner_override_reason", "naysayer_override_reason")
+
+
+def _gated_claim_flash(request: Request, supplied: list[str]) -> HTMLResponse:
+    """Refuse a claim this path cannot validate, instead of dropping it.
+
+    The forms carry these fields because the Magickit-served UI enforces them.
+    Reaching Conclair directly (loopback :8115) bypasses that enforcement, so
+    silently ignoring the field would be the worse failure: the post would
+    succeed while `messages.role` stayed null, and the invariant "role is
+    non-null <-> it passed allowed_roles validation" would look satisfied
+    while the user believed they had declared one. Refusing says which door
+    to use.
+    """
+    return _render(
+        request,
+        "partials/flash.html",
+        {
+            "error_type": "UngatedClaimRejected",
+            "error": (
+                "この経路 (conclair 直, :8115) は role / override を検証できません。"
+                "Magickit 経由の UI から投稿してください。"
+            ),
+            "details": {"supplied_fields": supplied},
+        },
+    )
+
+
+def _gated_claims(**fields: str) -> list[str]:
+    """Names of the supplied claim fields, in declaration order."""
+    return [name for name in _GATED_CLAIM_FIELDS if fields.get(name)]
+
+
 @router.post(
     "/projects/{project}/threads",
     response_class=HTMLResponse,
@@ -425,7 +463,12 @@ async def threads_open(
     propose_content: Annotated[str, Form()],
     tags: Annotated[str, Form()] = "",
     commit_ref: Annotated[str, Form()] = "",
+    role: Annotated[str, Form()] = "",
 ) -> HTMLResponse:
+    supplied = _gated_claims(role=role)
+    if supplied:
+        return _gated_claim_flash(request, supplied)
+
     try:
         body = OpenThreadRequest(
             thread_id=thread_id,
@@ -471,7 +514,18 @@ async def messages_post(
     closes_thread: Annotated[str, Form()] = "",
     tags: Annotated[str, Form()] = "",
     commit_ref: Annotated[str, Form()] = "",
+    role: Annotated[str, Form()] = "",
+    owner_override_reason: Annotated[str, Form()] = "",
+    naysayer_override_reason: Annotated[str, Form()] = "",
 ) -> HTMLResponse:
+    supplied = _gated_claims(
+        role=role,
+        owner_override_reason=owner_override_reason,
+        naysayer_override_reason=naysayer_override_reason,
+    )
+    if supplied:
+        return _gated_claim_flash(request, supplied)
+
     try:
         body = PostMessageRequest(
             type=type,  # type: ignore[arg-type]
@@ -522,7 +576,18 @@ async def threads_close(
     related_tasks: Annotated[str, Form()] = "",
     tags: Annotated[str, Form()] = "",
     commit_ref: Annotated[str, Form()] = "",
+    role: Annotated[str, Form()] = "",
+    owner_override_reason: Annotated[str, Form()] = "",
+    naysayer_override_reason: Annotated[str, Form()] = "",
 ) -> HTMLResponse:
+    supplied = _gated_claims(
+        role=role,
+        owner_override_reason=owner_override_reason,
+        naysayer_override_reason=naysayer_override_reason,
+    )
+    if supplied:
+        return _gated_claim_flash(request, supplied)
+
     try:
         body = CloseThreadRequest(
             author=author,
