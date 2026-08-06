@@ -28,6 +28,11 @@
     --status-superseded: #9aa0a6;
     --status-parked: #9aa0a6;
 
+    --control-run: #9ece6a;
+    --control-supervised: #e0af68;
+    --control-hold: #f7768e;
+    --bg-hold: #2a1c22;
+
     --radius: 6px;
     --gap: 12px;
     --gap-lg: 24px;
@@ -315,6 +320,12 @@ textarea {
     border-color: var(--success);
     color: var(--success);
     background: rgba(158, 206, 106, 0.08);
+    transition: opacity 0.4s ease;
+}
+/* conclair.js adds this a few seconds after a success flash lands, then
+   removes the element. Errors are never given it. */
+.alert-leaving {
+    opacity: 0;
 }
 
 /* stacked form (open/post/close) */
@@ -366,3 +377,276 @@ details[open] > summary { margin-bottom: 8px; }
 .row > * { flex: 1; min-width: 0; }
 .spacer { height: var(--gap); }
 .text-right { text-align: right; }
+
+/* loop control widget (HOLD / RESUME) */
+.control-widget { border-left: 3px solid var(--border); }
+.control-widget.control-run { border-left-color: var(--control-run); }
+.control-widget.control-supervised { border-left-color: var(--control-supervised); }
+/* HOLD is the state you must not mistake for any other: tint the whole
+   card, not just the selected button. */
+.control-widget.control-hold {
+    border-left-color: var(--control-hold);
+    background: var(--bg-hold);
+}
+
+.control-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--gap);
+    flex-wrap: wrap;
+}
+.control-title { margin: 0; font-size: 15px; }
+.control-scope { font-size: 12px; }
+
+.control-segment {
+    display: flex;
+    gap: 0;
+    margin: 12px 0;
+    flex-wrap: wrap;
+}
+.control-btn {
+    padding: 6px 18px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    cursor: pointer;
+}
+.control-btn:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+.control-btn:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+.control-btn + .control-btn { border-left: none; }
+.control-btn:hover { color: var(--text); background: var(--bg-card); }
+.control-btn.is-selected { color: var(--bg); }
+.control-btn-run.is-selected {
+    background: var(--control-run);
+    border-color: var(--control-run);
+}
+.control-btn-supervised.is-selected {
+    background: var(--control-supervised);
+    border-color: var(--control-supervised);
+}
+.control-btn-hold.is-selected {
+    background: var(--control-hold);
+    border-color: var(--control-hold);
+}
+
+.control-line { margin: 4px 0; font-size: 13px; }
+.control-state { font-weight: 700; }
+.control-state-run { color: var(--control-run); }
+.control-state-supervised { color: var(--control-supervised); }
+.control-state-hold { color: var(--control-hold); }
+
+.control-alert { margin: 8px 0; }
+
+.control-note {
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-radius: var(--radius);
+    background: var(--bg-elev);
+    color: var(--text-muted);
+}
+.control-note-pending { color: var(--warning); }
+.control-note-stale { color: var(--danger); }
+.control-note-trust { background: none; padding: 6px 0 0; }
+
+.control-history { margin-top: 12px; font-size: 12px; }
+.control-history-list { margin: 6px 0 0; padding-left: 18px; }
+.control-history-list li { margin: 2px 0; }
+.control-history-note { color: var(--text-muted); }
+
+/* ==========================================================================
+   Small screens
+   ==========================================================================
+   Everything above is the desktop layout. This is the only block that knows
+   about narrow viewports, so "what changes on a phone" is answerable by
+   reading one place.
+
+   768px matches the breakpoint Magickit's dashboard already uses. The two
+   UIs sit behind one origin and get navigated between, so a shared cutover
+   width keeps them from reflowing at different moments on the same device.
+   ========================================================================== */
+
+@media (max-width: 768px) {
+    /* The navbar is 5 things in a row at desktop width. On a phone the
+       brand and the author field stay on the first line (author is what
+       you must set before you can post) and the links wrap to their own
+       scrollable line rather than shrinking to unhittable targets. */
+    .navbar {
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        padding: 8px 12px;
+    }
+    .nav-brand a { font-size: 16px; }
+    /* A single unbreakable token -- a long thread id, a URL, a JSON dump --
+       must not be able to set the page width and take everything else
+       sideways with it. `break-word` only breaks strings that would
+       overflow on their own, so ordinary prose is unaffected. */
+    body { overflow-wrap: break-word; }
+
+    .nav-links {
+        order: 3;
+        width: 100%;
+        gap: 4px;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        /* The scrollbar would eat a line of its own on some Androids. */
+        scrollbar-width: none;
+        /* Flex items default to `min-width: auto`, which means "never
+           shrink below your content". Without this the overflow-x above
+           does nothing: the row grows to fit the links instead of
+           scrolling them, and drags the document out to ~590px. */
+        min-width: 0;
+        flex-basis: 100%;
+    }
+    .nav-links::-webkit-scrollbar { display: none; }
+    .nav-links a {
+        white-space: nowrap;
+        padding: 8px 10px;
+    }
+    /* The project is in the page heading a few lines below; repeating it
+       in a wrapped navbar costs a line and says nothing new. */
+    .nav-project { display: none; }
+    .nav-user {
+        margin-left: auto;
+        gap: 6px;
+    }
+    #author-input {
+        width: 120px;
+        padding: 8px;
+    }
+
+    .container {
+        margin: 12px auto;
+        padding: 0 12px;
+        gap: 16px;
+    }
+    .card { padding: 14px; }
+    .card h1 { font-size: 20px; }
+    .card h2 { font-size: 16px; }
+    .footer { margin: 24px 0 16px; }
+
+    /* 16px is the threshold below which iOS Safari zooms the page on
+       focus, and it does not zoom back out. Everything typed into on a
+       phone has to clear it. */
+    input[type="text"], input[type="number"], select, textarea {
+        font-size: 16px;
+        padding: 8px 10px;
+    }
+    textarea { min-height: 110px; }
+
+    /* Fingers, not cursors. */
+    .btn {
+        padding: 10px 16px;
+        font-size: 14px;
+        min-height: 40px;
+    }
+    .btn-sm {
+        padding: 6px 12px;
+        font-size: 13px;
+        min-height: 32px;
+    }
+
+    /* Side-by-side fields have nowhere to go at this width. */
+    .row { flex-direction: column; }
+    .inline-form { flex-wrap: wrap; }
+    .inline-form input { flex: 1 1 100%; }
+
+    .filter-form { gap: 8px; }
+    .filter-form label { width: 100%; }
+    .filter-form input,
+    .filter-form select { width: 100%; }
+    .filter-form select[multiple] {
+        min-width: 0;
+        height: 120px;
+    }
+
+    /* Tables that were not converted to the stacked form still have to
+       stop the page itself from scrolling sideways. */
+    .table:not(.table-stack) {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+
+    .msg { padding: 10px 12px; }
+    .msg-header { flex-wrap: wrap; gap: 6px 10px; }
+    pre { padding: 10px; font-size: 12px; }
+
+    /* Loop control: three buttons that must stay one tap each, so the
+       segment becomes equal thirds of the full width instead of wrapping
+       into a shape where the rounded ends land mid-row. */
+    .control-head { flex-direction: column; align-items: flex-start; gap: 2px; }
+    .control-segment {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        margin: 10px 0;
+    }
+    .control-btn {
+        padding: 12px 4px;
+        min-height: 44px;
+    }
+    .control-line { font-size: 12px; }
+}
+
+/* Stacked tables ----------------------------------------------------------
+   A row becomes a card and each cell carries its own label, so a six-column
+   thread list reads down the screen instead of sideways off it. The labels
+   live in `data-label` on the cell rather than being repeated in CSS: the
+   header text and the cell label are then one string in one file, and a
+   column added to the markup cannot silently get the wrong label.
+
+   Opt-in via `.table-stack` -- dense diagnostic tables are better left
+   scrolling, where lining values up column-wise is the point. */
+@media (max-width: 768px) {
+    .table-stack,
+    .table-stack tbody,
+    .table-stack tr,
+    .table-stack td {
+        display: block;
+        width: 100%;
+    }
+    .table-stack thead { display: none; }
+    .table-stack tr {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 8px 12px;
+        margin-bottom: 10px;
+    }
+    .table-stack td {
+        border: none;
+        padding: 3px 0;
+        display: flex;
+        align-items: baseline;
+        /* A cell can hold several siblings -- the tags cell holds one span
+           per tag, each `white-space: nowrap`. Flex does not wrap by
+           default, so without this they stay on one line no matter how
+           many there are, and no amount of overflow-wrap helps: nowrap
+           text has no break opportunity to find. */
+        flex-wrap: wrap;
+        gap: 2px 10px;
+        /* `anywhere`, not `break-word`. Only `anywhere` shrinks the
+           min-content width, and min-content is what a flex item refuses
+           to go below -- a long thread id in a plain text cell would
+           otherwise hold the row open and push the page sideways. It has
+           to sit on the cell so the anonymous flex item wrapping a bare
+           text node inherits it; that item cannot be selected. */
+        overflow-wrap: anywhere;
+    }
+    .table-stack td::before {
+        content: attr(data-label);
+        flex: 0 0 82px;
+        color: var(--text-muted);
+        font-size: 11px;
+        text-transform: lowercase;
+    }
+    /* The empty-state row is a single colspan cell with nothing to label. */
+    .table-stack td:not([data-label])::before { display: none; }
+    /* Element children need the flex-item escape hatch as well: `min-width`
+       defaults to `auto` there too. */
+    .table-stack td > * { min-width: 0; }
+}

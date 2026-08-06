@@ -3,6 +3,8 @@
 {% block title %}threads — {{ project }}{% endblock %}
 
 {% block content %}
+{% include "partials/control_widget.html" %}
+
 <section class="card">
     <h1>threads</h1>
     <p class="muted">project: <strong>{{ project }}</strong></p>
@@ -32,7 +34,10 @@
         </label>
     </form>
 
-    <table class="table">
+    {# table-stack: on a phone each row becomes a card (conclair.css). The
+       <th> text and the cells' data-label are the same column named twice --
+       change one, change the other. #}
+    <table class="table table-stack">
         <thead>
             <tr>
                 <th>thread_id</th>

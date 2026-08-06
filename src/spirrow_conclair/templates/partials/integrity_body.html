@@ -4,7 +4,10 @@
 </p>
 
 {% if result.issues %}
-<table class="table">
+{# Stacked on a phone (see .table-stack in conclair.css). The `details` JSON
+   is the reason: side-scrolling past three narrow columns to reach the one
+   cell that actually says what broke is the worst version of this table. #}
+<table class="table table-stack">
     <thead>
         <tr>
             <th>type</th>
@@ -16,16 +19,16 @@
     <tbody>
         {% for issue in result.issues %}
         <tr>
-            <td><span class="badge badge-handoff">{{ issue.type }}</span></td>
-            <td>
+            <td data-label="type"><span class="badge badge-handoff">{{ issue.type }}</span></td>
+            <td data-label="thread_id">
                 {% if issue.thread_id %}
                 <a href="/ui/projects/{{ project }}/threads/{{ issue.thread_id }}">
                     <code>{{ issue.thread_id }}</code>
                 </a>
                 {% endif %}
             </td>
-            <td>{% if issue.msg_id %}<code>{{ issue.msg_id }}</code>{% endif %}</td>
-            <td><code>{{ issue.details | tojson }}</code></td>
+            <td data-label="msg_id">{% if issue.msg_id %}<code>{{ issue.msg_id }}</code>{% endif %}</td>
+            <td data-label="details"><code>{{ issue.details | tojson }}</code></td>
         </tr>
         {% endfor %}
     </tbody>

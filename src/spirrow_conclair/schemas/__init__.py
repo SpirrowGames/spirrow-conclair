@@ -25,6 +25,14 @@ from spirrow_conclair.schemas.project import (
     ProjectSummary,
     ProjectSummaryListResponse,
 )
+from spirrow_conclair.schemas.project_control import (
+    ControlHistoryItem,
+    ControlHistoryListResponse,
+    ControlState,
+    ControlStateResponse,
+    ReportObservedRequest,
+    SetControlRequest,
+)
 from spirrow_conclair.schemas.read_cursor import (
     MarkReadRequest,
     MarkReadResponse,
@@ -49,6 +57,10 @@ __all__ = [
     "ChatroomEvent",
     "CloseThreadRequest",
     "CloseThreadResponse",
+    "ControlHistoryItem",
+    "ControlHistoryListResponse",
+    "ControlState",
+    "ControlStateResponse",
     "EventListResponse",
     "IntegrityCheckResponse",
     "IntegrityIssue",
@@ -62,6 +74,8 @@ __all__ = [
     "PostMessageResponse",
     "ProjectSummary",
     "ProjectSummaryListResponse",
+    "ReportObservedRequest",
+    "SetControlRequest",
     "Thread",
     "ThreadListResponse",
     "ThreadStatus",
