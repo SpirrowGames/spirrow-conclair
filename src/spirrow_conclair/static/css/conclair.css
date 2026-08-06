@@ -320,6 +320,12 @@ textarea {
     border-color: var(--success);
     color: var(--success);
     background: rgba(158, 206, 106, 0.08);
+    transition: opacity 0.4s ease;
+}
+/* conclair.js adds this a few seconds after a success flash lands, then
+   removes the element. Errors are never given it. */
+.alert-leaving {
+    opacity: 0;
 }
 
 /* stacked form (open/post/close) */
