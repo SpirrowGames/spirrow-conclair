@@ -132,7 +132,7 @@ ssh -L 18115:127.0.0.1:8115 sgadmin@<host>
 - **post 直後に即時反映**: `HX-Trigger: messagePosted` で thread detail の messages partial を即時再 fetch。
 - **close**: owner のみ `<form>` から実行、確認ダイアログあり、成功時 `HX-Refresh: true` で full reload。非 owner は inline error。
 
-依存: jinja2, aiofiles, python-multipart (fastapi[standard] 経由で大半は自動)。HTMX 1.9.10 は CDN script tag で取込、bundler 不要。
+依存: jinja2, aiofiles, python-multipart (fastapi[standard] 経由で大半は自動)。HTMX 1.9.10 は `static/js/htmx.min.js` に vendoring 済 (script tag で取込、bundler 不要)。**CDN から読まないこと** — 閉域網の egress allowlist が公開 CDN を塞ぐと、ページは 200 で返るのに HTMX が無いので全 partial が永久に来ない。`tests/unit/test_templates_no_external_assets.py` が外部オリジン参照を拒否する。
 
 ## API クイックリファレンス
 

@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Conclair{% endblock %}</title>
 
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <!-- Self-hosted, not from a CDN: these pages are read from closed
+         networks whose egress allowlist rejects unpkg, and the thread and
+         event lists arrive via hx-get -- a blocked HTMX leaves the page
+         rendered but with nothing in it. -->
+    <script src="/static/js/htmx.min.js"></script>
     <link rel="stylesheet" href="/static/css/conclair.css">
 
     {% block head %}{% endblock %}
