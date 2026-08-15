@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, status
-from sqlalchemy import BigInteger, cast, func, select
+from sqlalchemy import BigInteger, cast, func, nulls_last, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from spirrow_conclair.db import SessionDep
@@ -298,8 +298,18 @@ async def list_unread(
                 # `last_msg_num` is a stored column on the row already
                 # being read, so this key costs nothing to add -- and it
                 # is the same key `GET /threads` ranks on.
+                #
+                # NULLS LAST is explicit because Postgres defaults a DESC
+                # sort to NULLS FIRST, and the two triage surfaces must
+                # not disagree about where an unranked row goes (the
+                # listing already spells it out). A thread with no msgs
+                # cannot reach here -- `unread_count > 0` excludes it --
+                # so the reachable NULL is a *stale* key on a thread that
+                # does have unread msgs, i.e. the one row whose rank is
+                # known to be untrustworthy. NULLS FIRST would put exactly
+                # that row at the top of the inbox.
                 unread_count_subq.desc(),
-                Thread.last_msg_num.desc(),
+                nulls_last(Thread.last_msg_num.desc()),
                 Thread.created_at.desc(),
             )
             .limit(limit)
