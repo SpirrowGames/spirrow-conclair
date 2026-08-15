@@ -300,6 +300,29 @@ async def test_unread_count_with_cursor_in_interleaved_project(
     assert by_id["T-B"]["last_read_msg_id"] is None
 
 
+async def test_unread_ties_break_on_activity_not_creation(client: AsyncClient) -> None:
+    """The docstring has always said "most unread first, then by thread
+    recency"; the tiebreaker sorted on `created_at`, so a thread opened
+    later but silent outranked an older one posted to since. Equal unread
+    counts here make the tiebreaker the only thing under test."""
+    await _open(client, "p", "T-old")  # msg-001
+    await _open(client, "p", "T-young")  # msg-002
+    await _post(client, "p", "T-old", type="report", author="bob", content="r")  # msg-003
+    await _mark_read(
+        client, "p", "T-old", identity_name="Heisenberg", up_to_msg_id="msg-001",
+    )
+
+    code, body = await _unread(client, "p", "Heisenberg")
+
+    assert code == 200, body
+    # The tie is real: one unread msg each.
+    assert {i["thread_id"]: i["unread_count"] for i in body["items"]} == {
+        "T-old": 1,
+        "T-young": 1,
+    }
+    assert [i["thread_id"] for i in body["items"]] == ["T-old", "T-young"]
+
+
 async def test_unread_excludes_resolved_by_default(client: AsyncClient) -> None:
     await _open(client, "p", "T-1")
     # Close the thread -- alice is the owner.

@@ -107,7 +107,10 @@ actor は msg.author を継承 (status_transition の actor も同上)。
   "created_by_msg": "msg-001",
   "resolved_by_msg": null,
   "affects_threads": ["T-OTHER"],
-  "tags": ["chatroom-meta", "design"]
+  "tags": ["chatroom-meta", "design"],
+  "last_msg_id": "msg-042",
+  "msg_count": 6,
+  "last_activity_at": "2026-08-15T10:10:07Z"
 }
 ```
 
@@ -119,10 +122,22 @@ actor は msg.author を継承 (status_transition の actor も同上)。
 | owner | string | ✓ | author 文字列、close 権限保有者 |
 | status | enum | ✓ | active / awaiting_reply / resolved / superseded / parked |
 | created_at | string (ISO 8601 UTC) | ✓ | server-generated |
-| created_by_msg | string | ✓ | propose msg の msg_id |
+| created_by_msg | string | ✓ | **最初の** msg (propose) の msg_id。以後変わらない |
 | resolved_by_msg | string \| null | ✗ | resolved 時に decide msg の id |
 | affects_threads | string[] | ✗ | default `[]` |
 | tags | string[] | ✗ | default `[]` |
+| last_msg_id | string \| null | ✓ | **最新の** msg の msg_id (= inbox の `latest_msg_id`) |
+| msg_count | int | ✓ | thread 内の msg 総数 |
+| last_activity_at | string \| null | ✓ | 最新 msg の timestamp |
+
+末尾 3 つは read 時に `messages` から集計する派生値 (`services/thread_rollup.py`)。
+`threads` に非正規化列は無く、書き込み経路も触らない ∴ **stale になりえない**。
+msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` が propose を同 txn で
+書くので通常は到達不能。一覧の outer join がその行を落とさず報告するための余地)。
+
+`created_by_msg` と `last_msg_id` は**別物**である。前者は「最初」、後者は「最新」。
+一覧に msg_id が `created_by_msg` しか無かった時期に、活きている thread を「msg 1 本の残骸」と
+読む誤診が実際に起きた (2026-08-15)。
 
 ### 2.2 Message
 
@@ -392,7 +407,12 @@ actor は msg.author を継承 (status_transition の actor も同上)。
 }
 ```
 
-ソート順: `created_at DESC` (新しい thread が先)。
+ソート順: **`last_activity_at DESC`** (最後に post された thread が先)。同値は
+`created_at DESC` → `thread_id ASC` で決定的に解決する (pagination 安定のため)。
+
+6 月に開いた thread に今日 post すれば、8 月に開いて沈黙している thread より**上**に来る。
+棚卸しは上から読むので、活きているものほど下に沈む `created_at DESC` は triage 面として
+逆向きだった。**破壊的変更**: 既存の呼び出し側が「作成順」を仮定していると順序が変わる。
 
 ---
 
@@ -499,6 +519,11 @@ class Thread(BaseModel):
     resolved_by_msg: str | None = None
     affects_threads: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    # 派生 (services/thread_rollup)。default を持たせない = 供給し忘れが
+    # 「msg_count: 0」という尤もらしい嘘でなく型エラーとして出る。
+    last_msg_id: str | None
+    msg_count: int
+    last_activity_at: datetime | None
 
 class OpenThreadRequest(BaseModel):
     thread_id: str = Field(min_length=1, max_length=200)

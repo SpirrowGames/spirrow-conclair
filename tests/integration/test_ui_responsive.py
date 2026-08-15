@@ -60,7 +60,7 @@ async def test_thread_list_labels_match_its_headers(client: AsyncClient) -> None
     body = (await client.get(f"/ui/projects/{PROJECT}/threads")).text
 
     # The first data row's labels, in order, are the column headers.
-    assert _labels(body)[:6] == _headers(body)
+    assert _labels(body)[:7] == _headers(body)
 
 
 @pytest.mark.asyncio

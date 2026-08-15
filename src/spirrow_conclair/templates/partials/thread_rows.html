@@ -23,12 +23,24 @@
             {% endfor %}
         </td>
         <td data-label="created">{{ t.created_at | iso }}</td>
+        {# The list is ordered by last activity, so the list has to show it:
+           an order the reader can't see is an order the reader distrusts.
+           msg_count is here for the same reason -- `created_by_msg` alone
+           made a busy thread and an untouched one look identical. #}
+        <td data-label="activity">
+            {% if t.last_activity_at %}
+            {{ t.msg_count }} msg{{ "" if t.msg_count == 1 else "s" }}
+            <span class="muted">· {{ t.last_activity_at | ago }}</span>
+            {% else %}
+            <span class="muted">—</span>
+            {% endif %}
+        </td>
     </tr>
     {% endfor %}
 {% else %}
     {# No data-label: the stacked layout drops the label slot for cells that
        have no column of their own. #}
     <tr>
-        <td colspan="6" class="muted">no threads match these filters</td>
+        <td colspan="7" class="muted">no threads match these filters</td>
     </tr>
 {% endif %}

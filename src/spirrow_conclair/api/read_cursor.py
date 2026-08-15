@@ -26,6 +26,7 @@ from spirrow_conclair.schemas import (
 )
 from spirrow_conclair.services.msg_id_allocator import format_msg_id
 from spirrow_conclair.services.read_cursor import should_advance_cursor
+from spirrow_conclair.services.thread_rollup import msg_num_expr, thread_meta_subquery
 
 router = APIRouter(prefix="/v1/projects/{project}", tags=["read_cursor"])
 
@@ -224,24 +225,16 @@ async def list_unread(
     # numeric subtraction on the project-wide sequence, which would
     # count msgs from sibling threads. The per-thread counts below stay
     # in SQL (one GROUP BY) so the inbox is a single round-trip.
-    msg_num = cast(func.substring(Message.msg_id, 5), BigInteger)
+    msg_num = msg_num_expr()
     cursor_num = cast(
         func.substring(cursor_q.c.last_read_msg_id, 5), BigInteger
     )
 
     # Thread metadata: latest msg_id in *this* thread (for the response
     # `latest_msg_id` and the cursor-advance gate). Window-like rollup
-    # via GROUP BY thread_id.
-    thread_meta = (
-        select(
-            Message.thread_id.label("thread_id"),
-            func.max(msg_num).label("latest_num"),
-            func.count().label("total_count"),
-        )
-        .where(Message.project == project)
-        .group_by(Message.thread_id)
-        .subquery("thread_meta")
-    )
+    # via GROUP BY thread_id -- the same subquery the thread listing
+    # uses, shared so the two surfaces cannot drift apart.
+    thread_meta = thread_meta_subquery(project)
 
     # Per-thread unread count, *correlated with the cursor*: the count
     # of msgs in this thread whose numeric msg_id is strictly greater
@@ -302,8 +295,14 @@ async def list_unread(
         await session.execute(
             base.order_by(
                 # "Most unread first, then by thread recency" -- the
-                # first page is the actionable surface.
+                # first page is the actionable surface. Recency here is
+                # recency of *activity* (latest msg), not of creation:
+                # ordering by created_at sank threads that are alive but
+                # old below ones that are new and silent, which is the
+                # opposite of what a triage surface owes the reader.
+                # `latest_num` is already selected, so this is free.
                 unread_count_subq.desc(),
+                thread_meta.c.latest_num.desc(),
                 Thread.created_at.desc(),
             )
             .limit(limit)

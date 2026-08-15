@@ -14,6 +14,30 @@ ThreadStatus = Literal["active", "awaiting_reply", "resolved", "superseded", "pa
 
 
 class Thread(BaseModel):
+    """A thread's stored state plus its activity rollup.
+
+    **Two msg_id fields, and they mean different things.**
+
+    - ``created_by_msg`` — the thread's **first** msg (the propose). It
+      never changes, and it says nothing about how much is in the
+      thread. Before the rollup fields existed it was the only msg_id
+      on this object, which invited reading a busy thread as an empty
+      one (2026-08-15 near-miss).
+    - ``last_msg_id`` — the thread's **latest** msg. Same value as the
+      inbox's ``UnreadThreadItem.latest_msg_id``.
+
+    ``last_msg_id`` / ``msg_count`` / ``last_activity_at`` are derived
+    per request from ``messages`` (see ``services/thread_rollup``) —
+    nothing is denormalised onto ``threads``, so they cannot go stale.
+    They are ``None`` / ``0`` only for a thread with no msgs at all;
+    ``open_thread`` makes that unreachable, but the listing's outer
+    join reports such a row rather than dropping it.
+
+    ``last_activity_at`` is the newest msg **timestamp**, which callers
+    may supply; ``last_msg_id`` is derived from the server-allocated
+    sequence. They are normally consistent but not by construction.
+    """
+
     model_config = ConfigDict(from_attributes=True, str_strip_whitespace=True)
 
     project: str
@@ -26,6 +50,14 @@ class Thread(BaseModel):
     resolved_by_msg: str | None = None
     affects_threads: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    # Deliberately required (not defaulted): every construction site must
+    # supply a rollup it actually computed. A default would let a route
+    # emit `msg_count: 0` for a thread with 40 msgs -- a wrong number is
+    # worse here than a missing field, since the whole point of these
+    # fields is to be trusted at a glance during triage.
+    last_msg_id: str | None
+    msg_count: int
+    last_activity_at: datetime | None
 
 
 class OpenThreadRequest(BaseModel):
