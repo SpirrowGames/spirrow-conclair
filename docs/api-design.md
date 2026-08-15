@@ -107,7 +107,10 @@ actor は msg.author を継承 (status_transition の actor も同上)。
   "created_by_msg": "msg-001",
   "resolved_by_msg": null,
   "affects_threads": ["T-OTHER"],
-  "tags": ["chatroom-meta", "design"]
+  "tags": ["chatroom-meta", "design"],
+  "last_msg_id": "msg-042",
+  "msg_count": 6,
+  "last_activity_at": "2026-08-15T10:10:07Z"
 }
 ```
 
@@ -119,10 +122,29 @@ actor は msg.author を継承 (status_transition の actor も同上)。
 | owner | string | ✓ | author 文字列、close 権限保有者 |
 | status | enum | ✓ | active / awaiting_reply / resolved / superseded / parked |
 | created_at | string (ISO 8601 UTC) | ✓ | server-generated |
-| created_by_msg | string | ✓ | propose msg の msg_id |
+| created_by_msg | string | ✓ | **最初の** msg (propose) の msg_id。以後変わらない |
 | resolved_by_msg | string \| null | ✗ | resolved 時に decide msg の id |
 | affects_threads | string[] | ✗ | default `[]` |
 | tags | string[] | ✗ | default `[]` |
+| last_msg_id | string \| null | ✓ | **最新の** msg の msg_id (= inbox の `latest_msg_id`) |
+| msg_count | int | ✓ | thread 内の msg 総数 |
+| last_activity_at | string \| null | ✓ | **`last_msg_id` の** timestamp (thread 内の最大 timestamp ではない) |
+
+末尾 3 つは read 時に `messages` から集計する派生値 (`services/thread_rollup.py`)。
+書き込み経路がこの 3 つを触らない ∴ **stale になりえない**。
+(`threads` 上の非正規化列は並び替えキー `last_msg_num` の 1 本だけで、これは §3.4 の対象。
+そちらは `stale_activity_key` 監査が `messages` と突き合わせる。)
+msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` が propose を同 txn で
+書くので通常は到達不能。一覧がその行を落とさず報告するための余地)。
+
+`last_activity_at` は **`last_msg_id` と同じ 1 本の msg** の timestamp である。
+`timestamp` は request 側が渡せる ∴ backfill/import では msg 列と日付の順序が食い違い、
+2 列を別々に `max()` すると **id は最新の msg・日付は別の msg** という行が出る。
+個々の値はもっともらしく、組み合わせだけが偽なので誰も気付けない。
+
+`created_by_msg` と `last_msg_id` は**別物**である。前者は「最初」、後者は「最新」。
+一覧に msg_id が `created_by_msg` しか無かった時期に、活きている thread を「msg 1 本の残骸」と
+読む誤診が実際に起きた (2026-08-15)。
 
 ### 2.2 Message
 
@@ -204,6 +226,9 @@ actor は msg.author を継承 (status_transition の actor も同上)。
 - `dangling_thread_reference` — references_threads の対象 thread が project 内にない
 - `orphan_message` — msg.thread_id が threads に存在しない (FK が壊れる事故)
 - `inconsistent_resolved` — thread.status=resolved だが resolved_by_msg なし、または逆
+- `stale_activity_key` — `threads.last_msg_num` (非正規化された並び替えキー) が、その thread の
+  実際の最新 msg と食い違う。schema 内で唯一の非正規化値 ∴ 唯一「元と食い違いうる」値なので、
+  信用せず監査する。誤りの向きは危険側 (低すぎると活きた thread が一覧から沈む)
 
 ---
 
@@ -392,7 +417,36 @@ actor は msg.author を継承 (status_transition の actor も同上)。
 }
 ```
 
-ソート順: `created_at DESC` (新しい thread が先)。
+ソート順: **最新 msg 順** (最後に post された thread が先)。同値は `created_at DESC` →
+`thread_id ASC` で決定的に解決する。
+
+6 月に開いた thread に今日 post すれば、8 月に開いて沈黙している thread より**上**に来る。
+棚卸しは上から読むので、活きているものほど下に沈む `created_at DESC` は triage 面として
+逆向きだった。**破壊的変更**: 既存の呼び出し側が「作成順」を仮定していると順序が変わる。
+
+キーは `last_activity_at` (timestamp) では**なく** server 採番の msg 列 (`threads.last_msg_num`
+= その thread の最新 msg_id の数値部)。
+`timestamp` は request 側が渡せる項目なので、それで並べると**呼び出し側が自分の thread の
+表示位置を決められる**。しかも誤りの向きが非対称で、日付を過去にした post は「今 post された
+thread を沈める」= この一覧が防ごうとしている失敗そのものになる (import/backfill で現実に起きる)。
+msg 列で並べた場合の誤りは「古い thread が上に出る」だけで、読み手が見て捨てられる。
+`GET /unread` も同じキーで並ぶ ∴ 2 つの triage 面で順序規則が 1 つになる。
+`last_activity_at` は表示用として応答に載る。
+
+なお `last_msg_num` は project 内で一意 (msg_id は project 横断採番) ∴ 第一キーだけで全順序。
+上記の tiebreak は msg を 1 本も持たない行 (= NULL) のための保険。
+
+**このキーは `threads` 上に持つ (非正規化)。** 当初は `messages` の `GROUP BY thread_id` から
+読み時に導出していたが、並び替えキーを導出すると LIMIT より先に集計を終える必要があり、
+かつ集計の絞りは `project` だけなので plan は `messages` **全体**の並列 seq scan になった
+= **他の project が育つとこの project の一覧が遅くなる** (live は 15 project が同居)。
+CI 実測 (`tests/integration/test_thread_listing_scale.py`、`GET /threads?limit=100`):
+300k msgs で 85 ms、同規模の兄弟 project が同居すると 133 ms。導出前の一覧は 2.6 ms。
+∴ **並び替えキーだけ**を `threads.last_msg_num` (+ `idx_threads_activity`) に置いた。
+`msg_count` / `last_activity_at` は非正規化しない — 何もそれで並ばないので、LIMIT 済みの
+≤100 thread に限った集計で足り (`idx_messages_thread` が効く)、write path との結合は
+1 代入で済む。書き込み経路は 2 箇所だけ (`open_thread` / `post_message_in_session`)、
+ズレは `stale_activity_key` 監査が検出する。
 
 ---
 
@@ -499,6 +553,11 @@ class Thread(BaseModel):
     resolved_by_msg: str | None = None
     affects_threads: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    # 派生 (services/thread_rollup)。default を持たせない = 供給し忘れが
+    # 「msg_count: 0」という尤もらしい嘘でなく型エラーとして出る。
+    last_msg_id: str | None
+    msg_count: int
+    last_activity_at: datetime | None
 
 class OpenThreadRequest(BaseModel):
     thread_id: str = Field(min_length=1, max_length=200)

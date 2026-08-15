@@ -18,7 +18,7 @@ from spirrow_conclair.schemas import (
     PostMessageResponse,
 )
 from spirrow_conclair.services import integrity as integrity_svc
-from spirrow_conclair.services.msg_id_allocator import allocate_next_msg_id
+from spirrow_conclair.services.msg_id_allocator import allocate_next_msg_id, parse_msg_id
 from spirrow_conclair.services.status_transition import compute_transition
 
 router = APIRouter(
@@ -116,6 +116,13 @@ async def post_message_in_session(
         role=role,
     )
     session.add(msg_orm)
+    # The thread's activity sort key. This is the *only* place a msg is added
+    # to an existing thread, and open_thread is the only other place a msg is
+    # created at all, so those two assignments are the whole write path for
+    # `threads.last_msg_num`. It is monotonic by construction (the allocator
+    # hands out increasing numbers within a project), and the
+    # `stale_activity_key` integrity check recomputes it from `messages`.
+    thread.last_msg_num = parse_msg_id(msg_id)
     # Make the new msg visible to the status-transition event row insert
     # in the same transaction.
     await session.flush()

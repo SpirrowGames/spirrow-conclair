@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 async def _open(client: AsyncClient, project: str, thread_id: str, owner: str = "alice") -> None:
@@ -298,6 +300,110 @@ async def test_unread_count_with_cursor_in_interleaved_project(
     # T-B: no cursor; all 4 of its msgs are unread (msg-002, 005, 006, 007).
     assert by_id["T-B"]["unread_count"] == 4
     assert by_id["T-B"]["last_read_msg_id"] is None
+
+
+async def test_unread_ties_break_on_activity_not_creation(client: AsyncClient) -> None:
+    """The docstring has always said "most unread first, then by thread
+    recency"; the tiebreaker sorted on `created_at`, so a thread opened
+    later but silent outranked an older one posted to since. Equal unread
+    counts here make the tiebreaker the only thing under test."""
+    await _open(client, "p", "T-old")  # msg-001
+    await _open(client, "p", "T-young")  # msg-002
+    await _post(client, "p", "T-old", type="report", author="bob", content="r")  # msg-003
+    await _mark_read(
+        client, "p", "T-old", identity_name="Heisenberg", up_to_msg_id="msg-001",
+    )
+
+    code, body = await _unread(client, "p", "Heisenberg")
+
+    assert code == 200, body
+    # The tie is real: one unread msg each.
+    assert {i["thread_id"]: i["unread_count"] for i in body["items"]} == {
+        "T-old": 1,
+        "T-young": 1,
+    }
+    assert [i["thread_id"] for i in body["items"]] == ["T-old", "T-young"]
+
+
+async def test_unread_sorts_an_unranked_thread_the_same_way_the_listing_does(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+) -> None:
+    """A NULL activity key must land in the same place on both surfaces.
+
+    Postgres defaults a DESC sort to NULLS FIRST, so the inbox and the
+    listing disagree unless both say NULLS LAST -- and the whole point of
+    ranking both on one stored column was that they cannot drift apart.
+
+    The reachable NULL is not an empty thread (the next test pins that
+    those never enter the inbox at all); it is a key that has gone stale,
+    which `stale_activity_key` reports and this ordering must not promote.
+    Nulled here by direct UPDATE because the write path cannot produce it.
+    """
+    await _open(client, "p", "T-a")  # msg-001
+    await _open(client, "p", "T-b")  # msg-002 -- outranks T-a while ranked
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE threads SET last_msg_num = NULL "
+                "WHERE project = 'p' AND thread_id = 'T-b'"
+            )
+        )
+        await session.commit()
+
+    code, body = await _unread(client, "p", "Bohr")
+    listed = (await client.get("/v1/projects/p/threads")).json()["items"]
+
+    assert code == 200, body
+    # The tie is real, so the activity key is the only thing under test.
+    assert {i["thread_id"]: i["unread_count"] for i in body["items"]} == {
+        "T-a": 1,
+        "T-b": 1,
+    }
+    # Unknown rank sorts last, not first -- and NULLS FIRST would have put
+    # T-b on top, which is also where its *intact* key would have put it,
+    # so the two surfaces agreeing is the assertion that can tell them apart.
+    assert [i["thread_id"] for i in body["items"]] == ["T-a", "T-b"]
+    assert [t["thread_id"] for t in listed] == [i["thread_id"] for i in body["items"]]
+
+
+async def test_unread_never_contains_a_thread_with_no_msgs(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+) -> None:
+    """An empty thread cannot enter the inbox regardless of how NULLs sort.
+
+    The inbox's membership rule is `unread_count > 0`, which is about
+    `messages`, so a thread with none is excluded before ordering is
+    reached. Pinned because the ordering above is easy to justify with the
+    wrong reason ("otherwise empty threads float to the top"), and a wrong
+    reason invites deleting the guard when the reason turns out not to
+    hold. `open_thread` writes the propose in the same txn, so the row has
+    to be inserted directly to exist at all.
+    """
+    await _open(client, "p", "T-real")
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO threads (project, thread_id, title, owner, status, "
+                "created_at, created_by_msg) VALUES "
+                "('p', 'T-empty', 't', 'alice', 'active', now(), 'msg-000')"
+            )
+        )
+        await session.commit()
+
+    code, body = await _unread(client, "p", "Bohr")
+
+    assert code == 200, body
+    assert [i["thread_id"] for i in body["items"]] == ["T-real"]
+    assert body["total"] == 1
+    # ... while the listing does report it (it is a real row), with the
+    # unranked-goes-last rule the previous test pins.
+    listed = (await client.get("/v1/projects/p/threads")).json()["items"]
+    assert [t["thread_id"] for t in listed] == ["T-real", "T-empty"]
+    assert listed[1]["last_msg_id"] is None
+    assert listed[1]["msg_count"] == 0
+    assert listed[1]["last_activity_at"] is None
 
 
 async def test_unread_excludes_resolved_by_default(client: AsyncClient) -> None:

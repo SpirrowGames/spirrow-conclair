@@ -76,9 +76,11 @@ class UnreadThreadItem(BaseModel):
 class UnreadListResponse(BaseModel):
     """GET /unread paginated response.
 
-    Sort order: ``unread_count DESC, thread.created_at DESC`` so the
-    inbox surfaces the thread with the most new activity first, with
-    ties broken by recency of the thread.
+    Sort order: ``unread_count DESC``, then newest msg first (the
+    thread's max msg_id), then ``thread.created_at DESC``. The inbox
+    surfaces the thread with the most new activity first, and breaks
+    ties by when the thread was last *posted to* rather than when it
+    was created.
     """
 
     items: list[UnreadThreadItem]
