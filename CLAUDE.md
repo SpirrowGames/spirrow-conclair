@@ -77,7 +77,7 @@ src/spirrow_conclair/
 │   ├── deps.py          # Jinja2Templates singleton + iso filter
 │   └── forms.py         # parse_csv() helper (CSV → list)
 ├── templates/           # Jinja2 templates
-│   ├── base.html        # navbar (author input) + HTMX CDN + footer
+│   ├── base.html        # navbar (author input) + HTMX (self-host) + footer
 │   ├── landing.html     # recent projects + project picker
 │   ├── thread_list.html # filter form + table + open form
 │   ├── thread_detail.html # messages + post form + close form
@@ -87,7 +87,8 @@ src/spirrow_conclair/
 │                        # event_rows, integrity_body, flash)
 ├── static/              # served at /static/
 │   ├── css/conclair.css # CSS variables theme (~270 行)
-│   └── js/conclair.js   # localStorage author / recent projects, hx-vals inject
+│   ├── js/conclair.js   # localStorage author / recent projects, hx-vals inject
+│   └── js/htmx.min.js   # htmx 1.9.10 vendoring 済 (CDN 禁止。下記「静的資産」節)
 └── exceptions.py        # ChatroomError 階層 (NotFound/Integrity/Permission/State/DB)
 
 alembic/                 # migration
@@ -173,6 +174,25 @@ page 埋め込み・poll・button post の 3 経路すべてを描く。エラ�
 `actor` は navbar の author-input を `conclair.js` が `author` として全 HTMX リクエストに注入する経路を再利用する。
 
 `ChatroomError` / `pydantic.ValidationError` はいずれも 200 + `partials/flash.html` で inline 表示 (HTMX swap が必ず発火するため)。詳細は `docs/usage-cheatsheet.md` の「UI 経由」セクション。
+
+### 静的資産は自オリジンから配る (CDN 禁止)
+
+**テンプレートの `src=` / `href=` にオリジン付き URL を書かない。** HTMX も含めて
+`static/` に vendoring する (`js/htmx.min.js` = 1.9.10)。`tests/unit/test_templates_no_external_assets.py`
+が全テンプレートを走査して拒否する。
+
+理由は「オフラインでも動く」ではなく**壊れ方が見えない**こと。この UI を読む開発 PC は
+egress allowlist 付きの proxy 越しにいて、公開 CDN (unpkg / jsdelivr) は 403 で塞がれる。
+HTML 自体はこのホストが返すので**ページは 200 で描画される** ∴ 症状は「資産が読めない」ではなく
+「thread も event も永久に来ない」— partial を取りに行く HTMX がそもそも居ないため。
+サーバ側のログ・ステータスは終始正常に見える (2026-08-15)。
+
+**どの mount が実際に配るかに注意。** Magickit の `/ui` proxy が転送するのは
+`conclair.css` / `conclair.js` の 2 本だけで、それ以外の `/static/*` は **Magickit 側の mount に
+ヒットする** ∴ :8443 経由で chatroom を読むブラウザが受け取る `htmx.min.js` は Magickit のコピー。
+それでも conclair が自分のコピーを持つのは、直接配信の経路があることと、
+「他サービスが vendoring 済であることに依存するテンプレート」は単体で検査できないため
+(両者は同一版・同一 sha256 を保つこと)。
 
 ## 主要不変条件
 
