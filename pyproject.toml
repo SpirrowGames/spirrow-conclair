@@ -47,6 +47,9 @@ packages = ["src/spirrow_conclair"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "perf: seeds a large database and measures wall clock. Minutes, not seconds -- excluded from the default run with `-m 'not perf'` and run as its own CI job.",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:pydantic.*",
 ]

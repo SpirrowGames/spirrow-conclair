@@ -17,6 +17,7 @@ IntegrityIssueType = Literal[
     "dangling_thread_reference",
     "orphan_message",
     "inconsistent_resolved",
+    "stale_activity_key",
 ]
 
 

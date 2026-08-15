@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Path, Query, status
-from sqlalchemy import ColumnElement, func, nulls_last, select
+from sqlalchemy import ColumnElement, Select, func, nulls_last, select
 
 from spirrow_conclair.api.messages import post_message_in_session
 from spirrow_conclair.db import SessionDep
@@ -31,13 +31,14 @@ from spirrow_conclair.schemas import (
     ThreadView,
 )
 from spirrow_conclair.services import integrity as integrity_svc
-from spirrow_conclair.services.msg_id_allocator import allocate_next_msg_id
+from spirrow_conclair.services.msg_id_allocator import allocate_next_msg_id, parse_msg_id
 from spirrow_conclair.services.permissions import assert_owner_can_close
 from spirrow_conclair.services.thread_rollup import (
+    EMPTY_ROLLUP,
     ThreadRollup,
+    fetch_rollups,
     fetch_thread_rollup,
     msg_num_expr,
-    thread_meta_subquery,
 )
 
 router = APIRouter(prefix="/v1/projects/{project}/threads", tags=["threads"])
@@ -109,6 +110,10 @@ async def open_thread(
             resolved_by_msg=None,
             affects_threads=[],
             tags=list(body.tags),
+            # The propose msg below is this thread's newest (and only) msg, so
+            # the activity key is known without a query. The other write site
+            # is post_message_in_session; those two are the whole write path.
+            last_msg_num=parse_msg_id(msg_id),
         )
         msg_orm = Message(
             project=project,
@@ -160,6 +165,60 @@ async def open_thread(
 # --- GET /threads (list_threads) -----------------------------------------
 
 
+def listing_query(
+    project: str,
+    conditions: list[ColumnElement[bool]],
+    *,
+    limit: int,
+    offset: int,
+) -> Select[tuple[Thread]]:
+    """The statement behind ``GET /threads``, as an object.
+
+    Lifted out of the route so the scale suite
+    (``tests/integration/test_thread_listing_scale.py``) can ``EXPLAIN``
+    *this* statement rather than a hand-copied lookalike. A query whose
+    cost is an argument in review has to be measurable without a
+    transcription step that can go stale.
+    """
+    del project  # part of `conditions`; kept for a readable call site
+    return (
+        select(Thread)
+        .where(*conditions)
+        # Order on the msg *sequence* (`last_msg_num`), not on
+        # `last_activity_at`. The two normally agree -- timestamps come
+        # from the server -- but `timestamp` is a *request* field
+        # (PostMessageRequest / OpenThreadRequest), so ordering on it
+        # means a caller can decide where a thread lands. The two errors
+        # are not symmetric: a backdated post would sink the thread it
+        # was just posted to (a live thread hidden -- the exact failure
+        # this listing exists to prevent), whereas the sequence can only
+        # surface a backfilled thread too high, which the reader sees and
+        # dismisses. `last_activity_at` stays on the response as the
+        # human-readable rendering of the same fact.
+        #
+        # msg_id is allocated project-wide, so `last_msg_num` is unique
+        # across the threads of one project -- the first key is by itself
+        # a total order. The tiebreakers below only bind for rows where
+        # it is NULL (a thread with no msgs, which open_thread makes
+        # unreachable), so they are a guard rather than a load-bearing
+        # rule.
+        #
+        # Cost: this reads `threads` only, and `idx_threads_activity`
+        # matches the key exactly, so the LIMIT terminates the scan. The
+        # earlier form -- ordering on a GROUP BY over `messages` -- could
+        # not, and was measured at 85 ms / 133 ms where this is ~3 ms;
+        # see `services/thread_rollup` for the table and the point at
+        # which to re-measure.
+        .order_by(
+            nulls_last(Thread.last_msg_num.desc()),
+            Thread.created_at.desc(),
+            Thread.thread_id.asc(),
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+
+
 @router.get(
     "",
     response_model=ThreadListResponse,
@@ -199,60 +258,24 @@ async def list_threads(
         select(func.count()).select_from(Thread).where(*conditions)
     ) or 0
 
-    # Outer join: a thread with no msgs cannot normally exist (open_thread
-    # writes the propose in the same txn), but this is the triage surface --
-    # a row reported with a null rollup is recoverable, a row silently
-    # missing from the list is not.
-    meta = thread_meta_subquery(project)
-    rows = (
-        await session.execute(
-            select(
-                Thread,
-                meta.c.latest_num,
-                meta.c.total_count,
-                meta.c.last_activity_at,
-            )
-            .join(meta, meta.c.thread_id == Thread.thread_id, isouter=True)
-            .where(*conditions)
-            # Order on `latest_num` (max msg_id), not `last_activity_at`.
-            # The two normally agree -- timestamps come from the server --
-            # but `timestamp` is a *request* field (PostMessageRequest /
-            # OpenThreadRequest), so ordering on it means a caller can
-            # decide where a thread lands. The two errors are not
-            # symmetric: a backdated post would sink the thread it was
-            # just posted to (a live thread hidden -- the exact failure
-            # this listing exists to prevent), whereas the sequence can
-            # only surface a backfilled thread too high, which the reader
-            # sees and dismisses. `last_activity_at` stays on the
-            # response as the human-readable rendering of the same fact.
-            # This also matches GET /unread, which has always ordered on
-            # latest_num: one ordering rule for both triage surfaces.
-            #
-            # msg_id is allocated project-wide, so `latest_num` is unique
-            # across the threads of one project -- the first key is by
-            # itself a total order. The tiebreakers below only bind for
-            # rows the outer join left null (a thread with no msgs, which
-            # open_thread makes unreachable), so they are a guard rather
-            # than a load-bearing rule.
-            .order_by(
-                nulls_last(meta.c.latest_num.desc()),
-                Thread.created_at.desc(),
-                Thread.thread_id.asc(),
-            )
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
+    threads = (
+        (await session.execute(listing_query(project, conditions, limit=limit, offset=offset)))
+        .scalars()
+        .all()
+    )
+
+    # The display half of the rollup, for the <=`limit` rows just selected.
+    # Two round-trips instead of one join, deliberately: the join had to
+    # aggregate every msg in the table before the LIMIT could apply, whereas
+    # this aggregate is bounded by the page.
+    rollups = await fetch_rollups(
+        session, project=project, thread_ids=[t.thread_id for t in threads]
+    )
 
     return ThreadListResponse(
         items=[
-            _thread_schema(
-                row[0],
-                ThreadRollup.from_parts(
-                    row.latest_num, row.total_count, row.last_activity_at
-                ),
-            )
-            for row in rows
+            _thread_schema(thread, rollups.get(thread.thread_id, EMPTY_ROLLUP))
+            for thread in threads
         ],
         total=total,
         limit=limit,

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, status
-from sqlalchemy import BigInteger, and_, cast, func, select
+from sqlalchemy import BigInteger, cast, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from spirrow_conclair.db import SessionDep
@@ -26,7 +26,7 @@ from spirrow_conclair.schemas import (
 )
 from spirrow_conclair.services.msg_id_allocator import format_msg_id
 from spirrow_conclair.services.read_cursor import should_advance_cursor
-from spirrow_conclair.services.thread_rollup import msg_num_expr, thread_meta_subquery
+from spirrow_conclair.services.thread_rollup import msg_num_expr
 
 router = APIRouter(prefix="/v1/projects/{project}", tags=["read_cursor"])
 
@@ -230,12 +230,12 @@ async def list_unread(
         func.substring(cursor_q.c.last_read_msg_id, 5), BigInteger
     )
 
-    # Thread metadata: latest msg_id in *this* thread (for the response
-    # `latest_msg_id` and the cursor-advance gate). Window-like rollup
-    # via GROUP BY thread_id -- the same subquery the thread listing
-    # uses, shared so the two surfaces cannot drift apart.
-    thread_meta = thread_meta_subquery(project)
-
+    # The latest msg_id in *this* thread (for the response `latest_msg_id`
+    # and the cursor-advance gate) is read straight off `threads`: it is the
+    # stored activity key, the same column `GET /threads` ranks on, so the two
+    # triage surfaces cannot drift apart. It used to be a GROUP BY over every
+    # msg in the project, joined in -- see `services/thread_rollup` for what
+    # that cost and why it moved.
     # Per-thread unread count, *correlated with the cursor*: the count
     # of msgs in this thread whose numeric msg_id is strictly greater
     # than the identity's cursor (or all of them when the cursor is
@@ -261,14 +261,9 @@ async def list_unread(
             Thread.status.label("status"),
             Thread.owner.label("owner"),
             Thread.created_at.label("created_at"),
-            thread_meta.c.latest_num.label("latest_num"),
+            Thread.last_msg_num.label("latest_num"),
             cursor_q.c.last_read_msg_id.label("last_read_msg_id"),
             unread_count_subq.label("unread_count"),
-        )
-        .join(
-            thread_meta,
-            and_(thread_meta.c.thread_id == Thread.thread_id),
-            isouter=False,
         )
         .join(
             cursor_q,
@@ -300,9 +295,11 @@ async def list_unread(
                 # ordering by created_at sank threads that are alive but
                 # old below ones that are new and silent, which is the
                 # opposite of what a triage surface owes the reader.
-                # `latest_num` is already selected, so this is free.
+                # `last_msg_num` is a stored column on the row already
+                # being read, so this key costs nothing to add -- and it
+                # is the same key `GET /threads` ranks on.
                 unread_count_subq.desc(),
-                thread_meta.c.latest_num.desc(),
+                Thread.last_msg_num.desc(),
                 Thread.created_at.desc(),
             )
             .limit(limit)
@@ -313,8 +310,13 @@ async def list_unread(
     items: list[UnreadThreadItem] = []
     for row in rows:
         # Reuse the allocator's format helper so the response uses the
-        # same zero-padding semantics as the rest of the system.
-        latest_msg_id = format_msg_id(row.latest_num)
+        # same zero-padding semantics as the rest of the system. A row is
+        # here only because `unread_count > 0`, so the thread has msgs and
+        # its activity key is set; the guard is for a key that has somehow
+        # gone stale, where reporting msg-000 would be worse than nothing.
+        latest_msg_id = (
+            format_msg_id(row.latest_num) if row.latest_num is not None else ""
+        )
         items.append(
             UnreadThreadItem(
                 thread_id=row.thread_id,

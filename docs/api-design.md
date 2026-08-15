@@ -219,6 +219,9 @@ msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` �
 - `dangling_thread_reference` — references_threads の対象 thread が project 内にない
 - `orphan_message` — msg.thread_id が threads に存在しない (FK が壊れる事故)
 - `inconsistent_resolved` — thread.status=resolved だが resolved_by_msg なし、または逆
+- `stale_activity_key` — `threads.last_msg_num` (非正規化された並び替えキー) が、その thread の
+  実際の最新 msg と食い違う。schema 内で唯一の非正規化値 ∴ 唯一「元と食い違いうる」値なので、
+  信用せず監査する。誤りの向きは危険側 (低すぎると活きた thread が一覧から沈む)
 
 ---
 
@@ -414,7 +417,8 @@ msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` �
 棚卸しは上から読むので、活きているものほど下に沈む `created_at DESC` は triage 面として
 逆向きだった。**破壊的変更**: 既存の呼び出し側が「作成順」を仮定していると順序が変わる。
 
-キーは `last_activity_at` (timestamp) では**なく** server 採番の msg 列 (`max(msg_id)`)。
+キーは `last_activity_at` (timestamp) では**なく** server 採番の msg 列 (`threads.last_msg_num`
+= その thread の最新 msg_id の数値部)。
 `timestamp` は request 側が渡せる項目なので、それで並べると**呼び出し側が自分の thread の
 表示位置を決められる**。しかも誤りの向きが非対称で、日付を過去にした post は「今 post された
 thread を沈める」= この一覧が防ごうとしている失敗そのものになる (import/backfill で現実に起きる)。
@@ -422,8 +426,20 @@ msg 列で並べた場合の誤りは「古い thread が上に出る」だけ�
 `GET /unread` も同じキーで並ぶ ∴ 2 つの triage 面で順序規則が 1 つになる。
 `last_activity_at` は表示用として応答に載る。
 
-なお `max(msg_id)` は project 内で一意 (msg_id は project 横断採番) ∴ 第一キーだけで全順序。
-上記の tiebreak は msg を 1 本も持たない行 (outer join の null) のための保険。
+なお `last_msg_num` は project 内で一意 (msg_id は project 横断採番) ∴ 第一キーだけで全順序。
+上記の tiebreak は msg を 1 本も持たない行 (= NULL) のための保険。
+
+**このキーは `threads` 上に持つ (非正規化)。** 当初は `messages` の `GROUP BY thread_id` から
+読み時に導出していたが、並び替えキーを導出すると LIMIT より先に集計を終える必要があり、
+かつ集計の絞りは `project` だけなので plan は `messages` **全体**の並列 seq scan になった
+= **他の project が育つとこの project の一覧が遅くなる** (live は 15 project が同居)。
+CI 実測 (`tests/integration/test_thread_listing_scale.py`、`GET /threads?limit=100`):
+300k msgs で 85 ms、同規模の兄弟 project が同居すると 133 ms。導出前の一覧は 2.6 ms。
+∴ **並び替えキーだけ**を `threads.last_msg_num` (+ `idx_threads_activity`) に置いた。
+`msg_count` / `last_activity_at` は非正規化しない — 何もそれで並ばないので、LIMIT 済みの
+≤100 thread に限った集計で足り (`idx_messages_thread` が効く)、write path との結合は
+1 代入で済む。書き込み経路は 2 箇所だけ (`open_thread` / `post_message_in_session`)、
+ズレは `stale_activity_key` 監査が検出する。
 
 ---
 

@@ -34,6 +34,7 @@ from spirrow_conclair.exceptions import (
 )
 from spirrow_conclair.models import Message, Thread
 from spirrow_conclair.schemas.event import IntegrityIssue
+from spirrow_conclair.services.msg_id_allocator import format_msg_id, parse_msg_id
 
 
 # ----- pre-write asserts -----
@@ -370,6 +371,31 @@ async def audit_project(
                     details=(
                         f"Thread.resolved_by_msg='{thread.resolved_by_msg}' "
                         f"but status='{thread.status}'"
+                    ),
+                )
+            )
+
+    # Stale activity key: threads.last_msg_num is the one denormalised value
+    # in the schema -- the sort key both triage surfaces rank on -- so it is
+    # the one value that can disagree with the messages it summarises. The
+    # rest of this audit checks references; this checks a cached derivation.
+    # It is nearly free here because every msg is already loaded.
+    #
+    # A wrong key is quiet and dangerous in the same direction as the defect
+    # the listing exists to fix: too low, and a live thread sinks out of
+    # sight. So it is checked rather than trusted.
+    for thread in threads_by_id.values():
+        msgs = msgs_by_thread.get(thread.thread_id, [])
+        expected = max(parse_msg_id(m.msg_id) for m in msgs) if msgs else None
+        if thread.last_msg_num != expected:
+            issues.append(
+                IntegrityIssue(
+                    type="stale_activity_key",
+                    thread_id=thread.thread_id,
+                    details=(
+                        f"Thread.last_msg_num={thread.last_msg_num} but the "
+                        f"newest msg in the thread is "
+                        f"{format_msg_id(expected) if expected else '(none)'}"
                     ),
                 )
             )

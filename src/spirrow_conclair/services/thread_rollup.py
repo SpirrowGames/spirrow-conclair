@@ -1,15 +1,41 @@
 """Per-thread activity rollup: last msg / msg count / last activity.
 
-These three values are **derived on read** from ``messages``. There is
-no denormalised column on ``threads`` and no write path that maintains
-one, so a stale rollup is not expressible: the value is recomputed by
-the same query that returns the row.
+``msg_count`` and ``last_activity_at`` are **derived on read** from
+``messages``: nothing sorts on them, so they are only ever needed for
+rows a caller is already holding, and a bounded aggregate keeps them
+impossible to leave stale.
 
-The shape is not new. ``GET /unread`` (``api/read_cursor.py``) has
-always produced ``latest_msg_id`` from exactly this ``GROUP BY
-thread_id`` aggregate; this module is that subquery, lifted so the
-thread listing and the single-thread read can use it too. The cost is
-therefore a known one rather than an estimate.
+``last_msg_id`` is different. It is the **sort key** of both triage
+surfaces, and a sort key cannot be derived cheaply: ordering by it means
+the aggregate must finish before the page's LIMIT can apply. Measured on
+the CI runner (``tests/integration/test_thread_listing_scale.py``), with
+``GET /threads?limit=100``:
+
+=================================  ==========  =========  =========
+scale                              pre-rollup  derived    stored
+=================================  ==========  =========  =========
+3k msgs / 120 threads                  1.3 ms     2.6 ms     5.5 ms
+300k msgs / 5k threads                 2.8 ms    76.4 ms     8.0 ms
+300k + a sibling project of 300k       3.3 ms   117.8 ms     7.5 ms
+=================================  ==========  =========  =========
+
+(medians of 5, GitHub-hosted runner, postgres:16 in Docker. "derived" is
+the abandoned form, still measured on every run so the comparison can be
+re-made at a new scale rather than believed from here.)
+
+The third row is the decisive one, and it is about *shape*, not size:
+the aggregate's only filter is ``project``, so the plan was a parallel
+sequential scan of the **whole** ``messages`` table. One project's
+listing therefore got slower as any **other** project grew -- and the
+live database holds 15 projects in that table. Storing the key removes
+that coupling entirely: 76 -> 118 ms as the table doubles becomes
+8.0 -> 7.5 ms, i.e. flat.
+
+**When to revisit**: the page is now an index scan over ``threads``, so
+its cost tracks thread count, not msg count, and not the table's other
+tenants. If ``GET /threads?limit=100`` is seen above 50 ms again, measure
+``fetch_rollups`` -- the per-page aggregate below, whose cost is msgs *in
+the 100 threads on the page* -- before touching the ordering.
 
 ``msg_id`` is allocated **project-wide** (``msg_id_allocator``), so
 every aggregate here must be grouped/filtered on
@@ -19,10 +45,11 @@ sequence would silently count sibling threads' msgs.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import BigInteger, ColumnElement, Subquery, cast, func, select
+from sqlalchemy import BigInteger, ColumnElement, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from spirrow_conclair.models import Message
@@ -36,33 +63,6 @@ def msg_num_expr() -> ColumnElement[int]:
     everything that orders or maxes msgs goes through this cast.
     """
     return cast(func.substring(Message.msg_id, 5), BigInteger)
-
-
-def thread_meta_subquery(project: str) -> Subquery:
-    """``GROUP BY thread_id`` rollup for one project.
-
-    Columns: ``thread_id`` / ``latest_num`` (max numeric msg id) /
-    ``total_count`` / ``last_activity_at`` (max msg timestamp).
-
-    ``last_activity_at`` is the max *timestamp*, which is not required
-    to agree with ``latest_num``: ``timestamp`` may be supplied by the
-    caller (``OpenThreadRequest.timestamp`` / ``PostMessageRequest``),
-    while ``latest_num`` is server-allocated and monotonic. Order by
-    ``latest_num`` where "which msg is newest" must be exact -- both
-    surfaces that rank threads (``GET /threads``, ``GET /unread``) do,
-    and ``last_activity_at`` is carried for display only.
-    """
-    return (
-        select(
-            Message.thread_id.label("thread_id"),
-            func.max(msg_num_expr()).label("latest_num"),
-            func.count().label("total_count"),
-            func.max(Message.timestamp).label("last_activity_at"),
-        )
-        .where(Message.project == project)
-        .group_by(Message.thread_id)
-        .subquery("thread_meta")
-    )
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,42 @@ class ThreadRollup:
 
 
 EMPTY_ROLLUP = ThreadRollup(last_msg_id=None, msg_count=0, last_activity_at=None)
+
+
+async def fetch_rollups(
+    session: AsyncSession, *, project: str, thread_ids: Sequence[str]
+) -> dict[str, ThreadRollup]:
+    """Rollups for the threads on one page, in one aggregate round-trip.
+
+    Bounded by construction: the caller passes the ids the LIMIT already
+    selected (<= 1000, normally 100), so ``idx_messages_thread`` applies and
+    the aggregate never touches msgs belonging to threads nobody asked about.
+    This is the difference between the page costing what a page costs and the
+    page costing what the table costs.
+
+    Threads with no msgs are absent from the result; the caller supplies
+    ``EMPTY_ROLLUP`` for them.
+    """
+    if not thread_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                Message.thread_id,
+                func.max(msg_num_expr()),
+                func.count(),
+                func.max(Message.timestamp),
+            )
+            .where(
+                Message.project == project,
+                Message.thread_id.in_(list(thread_ids)),
+            )
+            .group_by(Message.thread_id)
+        )
+    ).all()
+    return {
+        row[0]: ThreadRollup.from_parts(row[1], row[2], row[3]) for row in rows
+    }
 
 
 async def fetch_thread_rollup(
