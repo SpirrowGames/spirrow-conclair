@@ -111,7 +111,7 @@ scripts/
 └── restore.sh           # snapshot から DB 復元
 tests/
 ├── unit/                # 131 cases (services の pure 部分)
-└── integration/         # 134 cases (testcontainers postgres + httpx ASGITransport)
+└── integration/         # 135 cases (testcontainers postgres + httpx ASGITransport)
 ```
 
 ## API レイヤ (`/v1` JSON)
@@ -240,7 +240,7 @@ tests/unit/        # 131 cases (services の pure 部分)
   test_thread_rollup.py        # 活動 rollup の射影 + subquery の列名
   test_exceptions.py           # 階層 + details propagation
 
-tests/integration/ # 134 cases, testcontainers postgres:16
+tests/integration/ # 135 cases, testcontainers postgres:16
   conftest.py              # postgres container + alembic + fixtures
   test_api_threads.py      # open / list / get e2e
   test_api_messages.py     # post + transitions + concurrent allocator
@@ -253,7 +253,7 @@ tests/integration/ # 134 cases, testcontainers postgres:16
   test_ui_control.py       # control ウィジェット: 反映待ち / stale / 拒否
 ```
 
-合計 265 cases (unit 131 + integration 134)。**CI (`.github/workflows/ci.yml`) が PR ごとに両方走らせる** (ubuntu-latest, Python 3.11/3.12)。integration は Docker を要求するので、手元に Docker が無いホストではこの CI が唯一の実行場所になる。
+合計 266 cases (unit 131 + integration 135)。**CI (`.github/workflows/ci.yml`) が PR ごとに両方走らせる** (ubuntu-latest, Python 3.11/3.12)。integration は Docker を要求するので、手元に Docker が無いホストではこの CI が唯一の実行場所になる。
 
 実行: `.venv/bin/pytest tests/` (両方) / `pytest tests/unit/` (高速のみ) / `pytest tests/integration/` (DB 必要)。
 
