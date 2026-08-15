@@ -46,4 +46,37 @@ jobs:
         run: uv run --python ${{ matrix.python-version }} pytest tests/unit -q
 
       - name: Integration tests (testcontainers postgres:16)
-        run: uv run --python ${{ matrix.python-version }} pytest tests/integration -q
+        run: uv run --python ${{ matrix.python-version }} pytest tests/integration -q -m "not perf"
+
+  # The scale suite seeds ~600k rows and measures wall clock, so it is not
+  # part of the matrix above: it runs once, on one interpreter, and its
+  # output is the record of what the thread listing costs. It asserts only
+  # a catastrophe ceiling -- a shared runner cannot honour a tight latency
+  # bound, and a flaky red gate is one everybody learns to ignore. `-s` is
+  # required: the measured table is printed, and captured output would
+  # discard exactly the thing this job exists to produce.
+  perf:
+    runs-on: ubuntu-latest
+    # A measurement job must not be able to hold CI hostage: if it has not
+    # produced its numbers by here, the log's per-phase timings say why.
+    timeout-minutes: 25
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://unused:unused@127.0.0.1:5432/unused
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.12
+
+      - name: Scale measurement (thread listing)
+        run: uv run --python 3.12 pytest tests/integration -m perf -q -s
