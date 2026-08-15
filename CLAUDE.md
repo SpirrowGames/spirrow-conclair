@@ -62,7 +62,8 @@ src/spirrow_conclair/
 │   ├── status_transition.py  # pure: handoff/ack/decide → 新 status
 │   ├── integrity.py          # pre-write asserts + audit_project (full report)
 │   ├── permissions.py        # owner check (close 用)
-│   └── msg_id_allocator.py   # advisory_xact_lock + numeric ordering
+│   ├── msg_id_allocator.py   # advisory_xact_lock + numeric ordering
+│   └── thread_rollup.py      # 活動 rollup (last_msg_id / msg_count / last_activity_at)
 ├── api/                 # FastAPI routers (/v1 JSON API)
 │   ├── __init__.py      # router collection
 │   ├── error_handlers.py     # Chatroom* → HTTP code mapping
@@ -109,8 +110,8 @@ scripts/
 ├── backup.sh            # 日次 pg_dump → snapshot
 └── restore.sh           # snapshot から DB 復元
 tests/
-├── unit/                # 100 cases (services の pure 部分)
-└── integration/         # 116 cases (testcontainers postgres + httpx ASGITransport)
+├── unit/                # 131 cases (services の pure 部分)
+└── integration/         # 134 cases (testcontainers postgres + httpx ASGITransport)
 ```
 
 ## API レイヤ (`/v1` JSON)
@@ -231,14 +232,15 @@ decide+closes_thread を closed status に投げると `ChatroomStateError`。
 ## テスト方針
 
 ```
-tests/unit/        # 100 cases (services の pure 部分)
+tests/unit/        # 131 cases (services の pure 部分)
   test_status_transition.py    # 全 type × 全 status matrix
   test_permissions.py          # owner check
   test_msg_id_allocator.py     # format/parse round-trip
   test_integrity.py            # assert_closes_thread_rule
+  test_thread_rollup.py        # 活動 rollup の射影 + subquery の列名
   test_exceptions.py           # 階層 + details propagation
 
-tests/integration/ # 116 cases, testcontainers postgres:16
+tests/integration/ # 134 cases, testcontainers postgres:16
   conftest.py              # postgres container + alembic + fixtures
   test_api_threads.py      # open / list / get e2e
   test_api_messages.py     # post + transitions + concurrent allocator
@@ -251,7 +253,7 @@ tests/integration/ # 116 cases, testcontainers postgres:16
   test_ui_control.py       # control ウィジェット: 反映待ち / stale / 拒否
 ```
 
-合計 227 cases (unit 111 + integration 116)。
+合計 265 cases (unit 131 + integration 134)。**CI (`.github/workflows/ci.yml`) が PR ごとに両方走らせる** (ubuntu-latest, Python 3.11/3.12)。integration は Docker を要求するので、手元に Docker が無いホストではこの CI が唯一の実行場所になる。
 
 実行: `.venv/bin/pytest tests/` (両方) / `pytest tests/unit/` (高速のみ) / `pytest tests/integration/` (DB 必要)。
 
