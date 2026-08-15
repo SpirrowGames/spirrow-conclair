@@ -49,7 +49,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import BigInteger, ColumnElement, cast, func, select
+from sqlalchemy import BigInteger, ColumnElement, Select, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from spirrow_conclair.models import Message
@@ -91,6 +91,49 @@ class ThreadRollup:
 EMPTY_ROLLUP = ThreadRollup(last_msg_id=None, msg_count=0, last_activity_at=None)
 
 
+def _rollup_rows(
+    *conditions: ColumnElement[bool],
+) -> Select[tuple[str, int, int, datetime]]:
+    """One row per thread: newest msg's number, the thread's msg count, and
+    **that msg's** timestamp.
+
+    The timestamp must come from the row holding the max sequence number,
+    not from an independent ``max(timestamp)``. The two agree only while
+    the two orders agree, and they are *allowed* to disagree: ``timestamp``
+    is a request field, so an import or a backfill inserts the newest msg
+    in the sequence carrying a years-old date. Maxing each column on its
+    own then reports one msg's id beside another msg's date -- a row that
+    is individually plausible and jointly false, which is worse than either
+    error alone because nothing about it looks wrong. ``last_activity_at``
+    is contracted (``docs/api-design.md`` §2.1) as the timestamp *of*
+    ``last_msg_id``, and that is a single msg.
+
+    A window rather than ``GROUP BY`` + a second lookup, so this stays the
+    one round-trip its callers document, over the same bounded input: the
+    partition is a thread, and the caller has already chosen which threads.
+    """
+    msg_num = msg_num_expr()
+    ranked = (
+        select(
+            Message.thread_id.label("thread_id"),
+            msg_num.label("latest_num"),
+            func.count().over(partition_by=Message.thread_id).label("total_count"),
+            Message.timestamp.label("last_activity_at"),
+            func.row_number()
+            .over(partition_by=Message.thread_id, order_by=msg_num.desc())
+            .label("rn"),
+        )
+        .where(*conditions)
+        .subquery()
+    )
+    return select(
+        ranked.c.thread_id,
+        ranked.c.latest_num,
+        ranked.c.total_count,
+        ranked.c.last_activity_at,
+    ).where(ranked.c.rn == 1)
+
+
 async def fetch_rollups(
     session: AsyncSession, *, project: str, thread_ids: Sequence[str]
 ) -> dict[str, ThreadRollup]:
@@ -109,17 +152,10 @@ async def fetch_rollups(
         return {}
     rows = (
         await session.execute(
-            select(
-                Message.thread_id,
-                func.max(msg_num_expr()),
-                func.count(),
-                func.max(Message.timestamp),
-            )
-            .where(
+            _rollup_rows(
                 Message.project == project,
                 Message.thread_id.in_(list(thread_ids)),
             )
-            .group_by(Message.thread_id)
         )
     ).all()
     return {
@@ -135,15 +171,16 @@ async def fetch_thread_rollup(
     Safe to call inside an open transaction after a msg was added: the
     aggregate is a SELECT, so SQLAlchemy's autoflush (and the explicit
     flush in ``post_message_in_session``) makes the pending msg visible.
+
+    A thread with no msgs produces **no row** here (the bare aggregate it
+    replaced produced one all-NULL row), so the empty case is spelled out
+    rather than falling out of ``from_parts``.
     """
     row = (
         await session.execute(
-            select(
-                func.max(msg_num_expr()),
-                func.count(),
-                func.max(Message.timestamp),
-            ).where(Message.project == project, Message.thread_id == thread_id)
+            _rollup_rows(Message.project == project, Message.thread_id == thread_id)
         )
-    ).one()
-    latest_num, total_count, last_activity_at = row
-    return ThreadRollup.from_parts(latest_num, total_count, last_activity_at)
+    ).first()
+    if row is None:
+        return EMPTY_ROLLUP
+    return ThreadRollup.from_parts(row[1], row[2], row[3])

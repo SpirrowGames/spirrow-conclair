@@ -128,12 +128,19 @@ actor は msg.author を継承 (status_transition の actor も同上)。
 | tags | string[] | ✗ | default `[]` |
 | last_msg_id | string \| null | ✓ | **最新の** msg の msg_id (= inbox の `latest_msg_id`) |
 | msg_count | int | ✓ | thread 内の msg 総数 |
-| last_activity_at | string \| null | ✓ | 最新 msg の timestamp |
+| last_activity_at | string \| null | ✓ | **`last_msg_id` の** timestamp (thread 内の最大 timestamp ではない) |
 
 末尾 3 つは read 時に `messages` から集計する派生値 (`services/thread_rollup.py`)。
-`threads` に非正規化列は無く、書き込み経路も触らない ∴ **stale になりえない**。
+書き込み経路がこの 3 つを触らない ∴ **stale になりえない**。
+(`threads` 上の非正規化列は並び替えキー `last_msg_num` の 1 本だけで、これは §3.4 の対象。
+そちらは `stale_activity_key` 監査が `messages` と突き合わせる。)
 msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` が propose を同 txn で
-書くので通常は到達不能。一覧の outer join がその行を落とさず報告するための余地)。
+書くので通常は到達不能。一覧がその行を落とさず報告するための余地)。
+
+`last_activity_at` は **`last_msg_id` と同じ 1 本の msg** の timestamp である。
+`timestamp` は request 側が渡せる ∴ backfill/import では msg 列と日付の順序が食い違い、
+2 列を別々に `max()` すると **id は最新の msg・日付は別の msg** という行が出る。
+個々の値はもっともらしく、組み合わせだけが偽なので誰も気付けない。
 
 `created_by_msg` と `last_msg_id` は**別物**である。前者は「最初」、後者は「最新」。
 一覧に msg_id が `created_by_msg` しか無かった時期に、活きている thread を「msg 1 本の残骸」と

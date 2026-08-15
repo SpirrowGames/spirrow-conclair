@@ -236,7 +236,9 @@ async def test_list_order_is_the_msg_sequence_not_the_msg_timestamp(
     """
     await _open_thread(client, "p", "T-a")  # msg-001
     await _open_thread(client, "p", "T-b")  # msg-002
-    await _post_msg(client, "p", "T-a", timestamp="2020-01-01T00:00:00Z")  # msg-003
+    backfilled = await _post_msg(
+        client, "p", "T-a", timestamp="2020-01-01T00:00:00Z"
+    )  # msg-003
 
     items = (await client.get("/v1/projects/p/threads")).json()["items"]
 
@@ -245,9 +247,57 @@ async def test_list_order_is_the_msg_sequence_not_the_msg_timestamp(
     # The two keys really do disagree in this fixture: ordering on the
     # timestamp would have put T-a second. Without this the assertion
     # above could pass by accident.
+    #
+    # Pinned as the backfilled msg's own timestamp, not as an inequality:
+    # T-a's *other* msg (the propose, dated now) is also older than T-b's,
+    # so `<` alone held while `last_activity_at` reported the propose --
+    # the assertion passed without ever seeing the msg it names.
+    assert items[0]["last_activity_at"] == backfilled["msg"]["timestamp"]
     assert datetime.fromisoformat(
         items[0]["last_activity_at"]
     ) < datetime.fromisoformat(items[1]["last_activity_at"])
+
+
+async def test_last_activity_at_is_the_timestamp_of_last_msg_id(
+    client: AsyncClient,
+) -> None:
+    """The two rollup fields must describe the **same** msg.
+
+    `last_msg_id` follows the server-allocated sequence; `last_activity_at`
+    is a caller-supplied timestamp. Taking each as its own column maximum
+    pairs the newest msg's id with the newest *date*, which after a
+    backfill belong to different msgs -- and a listing that reports
+    `msg-003 · 3 minutes ago` about a msg dated 2020 is wrong in the one
+    place a reader trusts at a glance.
+
+    Driven through all three read paths, because they are three separate
+    queries: the listing (`fetch_rollups`), get_thread and close
+    (`fetch_thread_rollup`).
+    """
+    opened = await _open_thread(client, "p", "T-1", timestamp="2026-08-01T00:00:00Z")
+    backfilled = await _post_msg(client, "p", "T-1", timestamp="2020-01-01T00:00:00Z")
+    # The fixture is only meaningful while the two orders disagree.
+    assert backfilled["msg"]["timestamp"] < opened["msg"]["timestamp"]
+
+    listed = (await client.get("/v1/projects/p/threads")).json()["items"][0]
+    assert listed["last_msg_id"] == "msg-002"
+    assert listed["last_activity_at"] == backfilled["msg"]["timestamp"]
+
+    got = (await client.get("/v1/projects/p/threads/T-1")).json()["thread"]
+    assert got["last_msg_id"] == "msg-002"
+    assert got["last_activity_at"] == backfilled["msg"]["timestamp"]
+
+    body = (
+        await client.post(
+            "/v1/projects/p/threads/T-1/close",
+            json={"summary_content": "## Resolution\ndone", "author": "alice"},
+        )
+    ).json()
+    # The decide msg is newest in both orders again -- the ordinary case,
+    # asserted so the close path is held to the same rule rather than
+    # checked by inspection.
+    assert body["thread"]["last_msg_id"] == "msg-003"
+    assert body["thread"]["last_activity_at"] == body["decide_msg"]["timestamp"]
 
 
 async def test_list_pagination_is_stable_across_pages(client: AsyncClient) -> None:

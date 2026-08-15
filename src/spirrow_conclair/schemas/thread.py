@@ -27,18 +27,23 @@ class Thread(BaseModel):
       inbox's ``UnreadThreadItem.latest_msg_id``.
 
     ``last_msg_id`` / ``msg_count`` / ``last_activity_at`` are derived
-    per request from ``messages`` (see ``services/thread_rollup``) —
-    nothing is denormalised onto ``threads``, so they cannot go stale.
-    They are ``None`` / ``0`` only for a thread with no msgs at all;
-    ``open_thread`` makes that unreachable, but the listing's outer
-    join reports such a row rather than dropping it.
+    per request from ``messages`` (see ``services/thread_rollup``): no
+    write path assigns them, so they cannot go stale. (``threads`` does
+    carry one denormalised value, ``last_msg_num`` — the listing's sort
+    key, which is not on this object and is audited by
+    ``stale_activity_key``.) These three are ``None`` / ``0`` only for a
+    thread with no msgs at all; ``open_thread`` makes that unreachable,
+    but the listing reports such a row rather than dropping it.
 
-    ``last_activity_at`` is the newest msg **timestamp**, which callers
-    may supply; ``last_msg_id`` is derived from the server-allocated
-    sequence. They are normally consistent but not by construction, so
-    the listing *ranks* on the sequence behind ``last_msg_id`` and
-    shows ``last_activity_at`` — a caller must not be able to choose
-    where its thread lands in someone else's triage list.
+    ``last_activity_at`` is the timestamp **of** ``last_msg_id`` — one
+    msg's two fields, not two independent maxima. The distinction is
+    load-bearing because ``timestamp`` is a value callers supply while
+    ``last_msg_id`` follows the server-allocated sequence: a backfill
+    makes the newest msg in the sequence the oldest by date, and a
+    per-column max would then pair one msg's id with another msg's
+    date. For the same reason the listing *ranks* on the sequence and
+    only *shows* ``last_activity_at`` — a caller must not be able to
+    choose where its thread lands in someone else's triage list.
     """
 
     model_config = ConfigDict(from_attributes=True, str_strip_whitespace=True)
