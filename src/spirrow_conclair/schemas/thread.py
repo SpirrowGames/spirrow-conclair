@@ -35,7 +35,10 @@ class Thread(BaseModel):
 
     ``last_activity_at`` is the newest msg **timestamp**, which callers
     may supply; ``last_msg_id`` is derived from the server-allocated
-    sequence. They are normally consistent but not by construction.
+    sequence. They are normally consistent but not by construction, so
+    the listing *ranks* on the sequence behind ``last_msg_id`` and
+    shows ``last_activity_at`` — a caller must not be able to choose
+    where its thread lands in someone else's triage list.
     """
 
     model_config = ConfigDict(from_attributes=True, str_strip_whitespace=True)

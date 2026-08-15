@@ -407,12 +407,23 @@ msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` �
 }
 ```
 
-ソート順: **`last_activity_at DESC`** (最後に post された thread が先)。同値は
-`created_at DESC` → `thread_id ASC` で決定的に解決する (pagination 安定のため)。
+ソート順: **最新 msg 順** (最後に post された thread が先)。同値は `created_at DESC` →
+`thread_id ASC` で決定的に解決する。
 
 6 月に開いた thread に今日 post すれば、8 月に開いて沈黙している thread より**上**に来る。
 棚卸しは上から読むので、活きているものほど下に沈む `created_at DESC` は triage 面として
 逆向きだった。**破壊的変更**: 既存の呼び出し側が「作成順」を仮定していると順序が変わる。
+
+キーは `last_activity_at` (timestamp) では**なく** server 採番の msg 列 (`max(msg_id)`)。
+`timestamp` は request 側が渡せる項目なので、それで並べると**呼び出し側が自分の thread の
+表示位置を決められる**。しかも誤りの向きが非対称で、日付を過去にした post は「今 post された
+thread を沈める」= この一覧が防ごうとしている失敗そのものになる (import/backfill で現実に起きる)。
+msg 列で並べた場合の誤りは「古い thread が上に出る」だけで、読み手が見て捨てられる。
+`GET /unread` も同じキーで並ぶ ∴ 2 つの triage 面で順序規則が 1 つになる。
+`last_activity_at` は表示用として応答に載る。
+
+なお `max(msg_id)` は project 内で一意 (msg_id は project 横断採番) ∴ 第一キーだけで全順序。
+上記の tiebreak は msg を 1 本も持たない行 (outer join の null) のための保険。
 
 ---
 

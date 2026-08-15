@@ -204,6 +204,10 @@ async def test_list_orders_by_activity_not_creation(client: AsyncClient) -> None
     Explicit timestamps rather than wall-clock ordering: the point of the
     fixture is that an old thread posted to today outranks a young silent
     one, and that only shows if the two orders actually disagree.
+
+    Both activity signals (msg sequence and msg timestamp) point the same
+    way here, which is the normal case. Which of the two the ordering
+    actually uses is pinned by the next test, where they disagree.
     """
     await _open_thread(client, "p", "T-old", timestamp="2026-06-01T00:00:00Z")
     await _open_thread(client, "p", "T-young", timestamp="2026-08-01T00:00:00Z")
@@ -219,9 +223,41 @@ async def test_list_orders_by_activity_not_creation(client: AsyncClient) -> None
     )
 
 
+async def test_list_order_is_the_msg_sequence_not_the_msg_timestamp(
+    client: AsyncClient,
+) -> None:
+    """`timestamp` is a request field, so it must not decide the order.
+
+    The newest msg in the project is posted here with a date years in the
+    past -- what an import or a backfill produces. Ordering on
+    `last_activity_at` would sink the thread that was *just* posted to,
+    i.e. hide a live thread, which is the failure this listing exists to
+    prevent. The server-allocated msg sequence cannot be steered that way.
+    """
+    await _open_thread(client, "p", "T-a")  # msg-001
+    await _open_thread(client, "p", "T-b")  # msg-002
+    await _post_msg(client, "p", "T-a", timestamp="2020-01-01T00:00:00Z")  # msg-003
+
+    items = (await client.get("/v1/projects/p/threads")).json()["items"]
+
+    assert [t["thread_id"] for t in items] == ["T-a", "T-b"]
+    assert items[0]["last_msg_id"] == "msg-003"
+    # The two keys really do disagree in this fixture: ordering on the
+    # timestamp would have put T-a second. Without this the assertion
+    # above could pass by accident.
+    assert datetime.fromisoformat(
+        items[0]["last_activity_at"]
+    ) < datetime.fromisoformat(items[1]["last_activity_at"])
+
+
 async def test_list_pagination_is_stable_across_pages(client: AsyncClient) -> None:
-    """Same activity timestamp on every thread -- the tiebreakers have to
-    produce one total order, or a row can appear on both pages or neither."""
+    """A row must not appear on two pages, or on neither.
+
+    Every thread here shares one activity timestamp; the order holds
+    because the primary key (max msg_id) is allocated project-wide and is
+    therefore unique across these rows on its own. The `created_at` /
+    `thread_id` tiebreakers exist for rows with no msgs at all.
+    """
     ts = "2026-07-01T00:00:00Z"
     for tid in ("T-a", "T-b", "T-c", "T-d"):
         await _open_thread(client, "p", tid, timestamp=ts)

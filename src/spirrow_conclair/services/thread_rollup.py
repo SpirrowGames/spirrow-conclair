@@ -48,7 +48,9 @@ def thread_meta_subquery(project: str) -> Subquery:
     to agree with ``latest_num``: ``timestamp`` may be supplied by the
     caller (``OpenThreadRequest.timestamp`` / ``PostMessageRequest``),
     while ``latest_num`` is server-allocated and monotonic. Order by
-    ``latest_num`` where "which msg is newest" must be exact.
+    ``latest_num`` where "which msg is newest" must be exact -- both
+    surfaces that rank threads (``GET /threads``, ``GET /unread``) do,
+    and ``last_activity_at`` is carried for display only.
     """
     return (
         select(

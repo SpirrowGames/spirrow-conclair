@@ -183,10 +183,11 @@ async def list_threads(
     *first* msg). Triage therefore does not require opening a thread to
     learn whether anything has happened in it.
 
-    Ordering is `last_activity_at DESC` -- a thread opened in June and
-    posted to today sorts above one opened in August and silent since.
-    Ties break on `created_at DESC`, then `thread_id` so pagination is
-    deterministic.
+    Ordering is by the thread's newest msg -- a thread opened in June
+    and posted to today sorts above one opened in August and silent
+    since. The key is the *server-allocated* msg sequence (max msg_id),
+    not `last_activity_at`; see the ordering comment below. Ties break
+    on `created_at DESC`, then `thread_id`.
     """
     conditions: list[ColumnElement[bool]] = [Thread.project == project]
     if status_filter:
@@ -213,8 +214,28 @@ async def list_threads(
             )
             .join(meta, meta.c.thread_id == Thread.thread_id, isouter=True)
             .where(*conditions)
+            # Order on `latest_num` (max msg_id), not `last_activity_at`.
+            # The two normally agree -- timestamps come from the server --
+            # but `timestamp` is a *request* field (PostMessageRequest /
+            # OpenThreadRequest), so ordering on it means a caller can
+            # decide where a thread lands. The two errors are not
+            # symmetric: a backdated post would sink the thread it was
+            # just posted to (a live thread hidden -- the exact failure
+            # this listing exists to prevent), whereas the sequence can
+            # only surface a backfilled thread too high, which the reader
+            # sees and dismisses. `last_activity_at` stays on the
+            # response as the human-readable rendering of the same fact.
+            # This also matches GET /unread, which has always ordered on
+            # latest_num: one ordering rule for both triage surfaces.
+            #
+            # msg_id is allocated project-wide, so `latest_num` is unique
+            # across the threads of one project -- the first key is by
+            # itself a total order. The tiebreakers below only bind for
+            # rows the outer join left null (a thread with no msgs, which
+            # open_thread makes unreachable), so they are a guard rather
+            # than a load-bearing rule.
             .order_by(
-                nulls_last(meta.c.last_activity_at.desc()),
+                nulls_last(meta.c.latest_num.desc()),
                 Thread.created_at.desc(),
                 Thread.thread_id.asc(),
             )

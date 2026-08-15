@@ -26,11 +26,14 @@
         {# The list is ordered by last activity, so the list has to show it:
            an order the reader can't see is an order the reader distrusts.
            msg_count is here for the same reason -- `created_by_msg` alone
-           made a busy thread and an untouched one look identical. #}
+           made a busy thread and an untouched one look identical.
+           last_msg_id is the actual sort key, so it is printed rather than
+           only the timestamp: the ids run strictly downwards on the page,
+           which lets a reader check the ordering instead of trusting it. #}
         <td data-label="activity">
-            {% if t.last_activity_at %}
+            {% if t.last_msg_id %}
             {{ t.msg_count }} msg{{ "" if t.msg_count == 1 else "s" }}
-            <span class="muted">· {{ t.last_activity_at | ago }}</span>
+            <span class="muted">· {{ t.last_msg_id }} · {{ t.last_activity_at | ago }}</span>
             {% else %}
             <span class="muted">—</span>
             {% endif %}
