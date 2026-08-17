@@ -97,6 +97,17 @@ async def open_thread(
                 details={"project": project, "thread_id": body.thread_id},
             )
 
+        # This path builds its propose msg directly rather than through
+        # post_message_in_session, so invariant 7 has to be asserted here too.
+        # closes_thread is hardcoded None below -- a thread's opening message
+        # cannot close it -- so 'none' is always refused on this route, which is
+        # the right answer: "nobody is next" is not a thing a brand-new thread
+        # can truthfully say.
+        integrity_svc.assert_next_participant_rule(
+            next_participant=body.next_participant,
+            closes_thread=None,
+        )
+
         msg_id = await allocate_next_msg_id(session, project)
 
         thread_orm = Thread(
@@ -131,6 +142,7 @@ async def open_thread(
             tags=list(body.tags),
             embodiment=body.embodiment,
             role=body.role,
+            next_participant=body.next_participant,
         )
         event_orm = ChatroomEvent(
             project=project,
@@ -380,6 +392,13 @@ async def close_thread(
             timestamp=body.timestamp,
             embodiment=body.embodiment,
             role=body.role,
+            # This route always sets closes_thread, so it is the one place
+            # 'none' is straightforwardly legal -- and the place it is most
+            # likely to be meant. Still not defaulted: writing a value the
+            # caller did not supply would make a recorded 'none' mean "somebody
+            # closed the thread" rather than "somebody declared no successor",
+            # and the whole point of the field is that it is a declaration.
+            next_participant=body.next_participant,
             owner_override=body.owner_override,
             owner_override_reason=body.owner_override_reason,
         )

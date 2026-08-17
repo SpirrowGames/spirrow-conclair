@@ -47,6 +47,7 @@ async def post_message_in_session(
     timestamp: datetime | None = None,
     embodiment: str | None = None,
     role: str | None = None,
+    next_participant: str | None = None,
     owner_override: bool = False,
     owner_override_reason: str | None = None,
 ) -> tuple[Message, str | None]:
@@ -85,6 +86,13 @@ async def post_message_in_session(
         author=author,
         owner_override=owner_override,
     )
+    # Order matters: this one accepts any non-None closes_thread as proof the
+    # msg closes its thread, which the assert above is what makes true (right
+    # thread, right author, type='decide'). See assert_next_participant_rule.
+    integrity_svc.assert_next_participant_rule(
+        next_participant=next_participant,
+        closes_thread=closes_thread,
+    )
     await integrity_svc.assert_reply_to_in_thread(
         session,
         project=project,
@@ -114,6 +122,7 @@ async def post_message_in_session(
         tags=tags,
         embodiment=embodiment,
         role=role,
+        next_participant=next_participant,
     )
     session.add(msg_orm)
     # The thread's activity sort key. This is the *only* place a msg is added
@@ -201,6 +210,7 @@ async def post_message(
             timestamp=body.timestamp,
             embodiment=body.embodiment,
             role=body.role,
+            next_participant=body.next_participant,
             owner_override=body.owner_override,
             owner_override_reason=body.owner_override_reason,
         )

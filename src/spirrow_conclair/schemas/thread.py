@@ -86,6 +86,10 @@ class OpenThreadRequest(BaseModel):
     # stamped onto the propose msg. Conclair persists verbatim; Magickit
     # validates against the Prismind identity record before forwarding.
     role: str | None = None
+    # Who acts next, stamped onto the propose msg. 'none' is always refused
+    # here: a propose msg cannot carry closes_thread, and a thread that has
+    # just been opened has not been settled by opening it (invariant 7).
+    next_participant: str | None = None
 
 
 class OpenThreadResponse(BaseModel):

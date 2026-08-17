@@ -19,6 +19,7 @@ Invariants enforced (per design v2 §9):
 4. reply_to (when set) must reference a msg in the same thread
 5. references_threads (when set) must all exist in the same project
 6. msg_id uniqueness — enforced by composite PK at the DB layer
+7. next_participant='none' requires closes_thread to be set on the same msg
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from spirrow_conclair.exceptions import (
     ChatroomNotFoundError,
 )
 from spirrow_conclair.models import Message, Thread
+from spirrow_conclair.models.message import NEXT_PARTICIPANT_NONE
 from spirrow_conclair.schemas.event import IntegrityIssue
 from spirrow_conclair.services.msg_id_allocator import format_msg_id, parse_msg_id
 
@@ -157,6 +159,52 @@ def assert_closes_thread_rule(
                 "thread_owner": thread.owner,
                 "author": author,
             },
+        )
+
+
+def assert_next_participant_rule(
+    *,
+    next_participant: str | None,
+    closes_thread: str | None,
+) -> None:
+    """Invariant 7: only a msg that closes its thread may say nobody is next.
+
+    ``next_participant='none'`` asserts "this thread has no successor", which
+    is the same fact ``closes_thread`` records — and the thread object is
+    already its keeper (``status='resolved'`` / ``resolved_by_msg``). Letting a
+    message assert it independently is what let the two drift: of the three
+    threads in the loop's history whose latest msg said ``none``, **zero**
+    closed with it. One was closed 15 minutes later by a second message; two
+    are still open — one for 37 days — and neither announced itself, because a
+    settled thread is precisely the stop the sweep does not report.
+
+    So the claim is writable only together with the act, and a recorded
+    ``none`` always means "this thread was closed" — the same shape ``role``
+    has, where a recorded value always means "this was verified".
+
+    **Call this after** :func:`assert_closes_thread_rule`. This function treats
+    any non-``None`` ``closes_thread`` as sufficient, which is only true once
+    that assert has established the value names *this* thread and comes from
+    its owner on a ``decide``. Reversing the order would let a msg satisfy
+    invariant 7 by naming somebody else's thread.
+
+    Participant names are deliberately **not** checked — not for existence, not
+    against a roster. Answering "may Heisenberg act here?" requires the
+    Prismind identity record, and Conclair must not pull identity state
+    cross-service (the boundary ``role`` already draws). Magickit owns that
+    half; this owns only what a single row can answer about itself.
+    """
+    if next_participant != NEXT_PARTICIPANT_NONE:
+        return
+
+    if closes_thread is None:
+        raise ChatroomIntegrityError(
+            f"next_participant='{NEXT_PARTICIPANT_NONE}' requires closes_thread to be "
+            "set on the same msg: a thread with no successor is a thread that is "
+            "finished, and finishing it is what closes_thread does. To hand off "
+            "without closing, name the participant (or 'human'); to close, set "
+            "closes_thread.",
+            details={"next_participant": next_participant, "closes_thread": None},
         )
 
 
