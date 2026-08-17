@@ -1,7 +1,8 @@
 """Pure integrity rules.
 
-`assert_closes_thread_rule` is fully synchronous and exercised here.
-The other invariants (assert_propose_invariant / assert_reply_to_in_thread /
+`assert_closes_thread_rule` and `assert_next_participant_rule` are fully
+synchronous and exercised here. The other invariants
+(assert_propose_invariant / assert_reply_to_in_thread /
 assert_references_threads_exist / fetch_thread_or_raise / audit_project)
 all touch the database and are covered by integration tests in T10.
 """
@@ -14,7 +15,10 @@ import pytest
 
 from spirrow_conclair.exceptions import ChatroomIntegrityError
 from spirrow_conclair.models import Thread
-from spirrow_conclair.services.integrity import assert_closes_thread_rule
+from spirrow_conclair.services.integrity import (
+    assert_closes_thread_rule,
+    assert_next_participant_rule,
+)
 
 
 def _thread(owner: str = "alice", thread_id: str = "T-1") -> Thread:
@@ -123,3 +127,56 @@ def test_owner_override_still_enforces_thread_id_match() -> None:
             author="human",
             owner_override=True,
         )
+
+
+# Invariant 7: a msg that closes its thread names no successor.
+
+
+def test_close_without_successor_is_ok() -> None:
+    # How "nobody is next" is recorded: by closing, and only by closing.
+    assert_next_participant_rule(next_participant=None, closes_thread="T-1")
+
+
+def test_close_with_successor_raises() -> None:
+    # The refused pair: the work is over AND somebody still owes a turn.
+    with pytest.raises(ChatroomIntegrityError) as ei:
+        assert_next_participant_rule(
+            next_participant="Heisenberg", closes_thread="T-1"
+        )
+    assert ei.value.details["next_participant"] == "Heisenberg"
+    assert ei.value.details["closes_thread"] == "T-1"
+
+
+def test_successor_without_close_is_ok() -> None:
+    # An ordinary handoff.
+    assert_next_participant_rule(next_participant="Heisenberg", closes_thread=None)
+
+
+def test_neither_is_ok() -> None:
+    # Omission is the pre-existing behaviour and stays unvalidated -- this is
+    # what keeps every message written before the column existed legal, and
+    # why the check could ship in the same revision as the column.
+    assert_next_participant_rule(next_participant=None, closes_thread=None)
+
+
+# No string is reserved. These two pin that, because the obvious reading of
+# "nobody is next" -- a sentinel like 'none' -- is exactly what this design
+# rejected: tied to a close it could say nothing `closes_thread` did not
+# already say, and untied it would be the divergence the invariant forbids.
+# (Tier B naysayer, PR #13.)
+
+
+@pytest.mark.parametrize("name", ["Heisenberg", "human", "none", "orchestrator", ""])
+def test_no_value_is_special_on_an_open_thread(name: str) -> None:
+    # Including the literal 'none': to Conclair it is a participant name like
+    # any other, and whether it is a legal one is Magickit's question -- that
+    # needs the Prismind identity record, which Conclair must not read.
+    assert_next_participant_rule(next_participant=name, closes_thread=None)
+
+
+@pytest.mark.parametrize("name", ["Heisenberg", "human", "none", ""])
+def test_no_value_is_special_on_a_closing_msg_either(name: str) -> None:
+    # 'none' is refused here for the same reason 'Heisenberg' is: the rule is
+    # about the field being *set*, not about which string it holds.
+    with pytest.raises(ChatroomIntegrityError):
+        assert_next_participant_rule(next_participant=name, closes_thread="T-1")

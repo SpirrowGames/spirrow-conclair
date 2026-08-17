@@ -51,6 +51,17 @@ class Message(Base):
     # the Magickit orchestration layer against the Prismind identity record
     # (Conclair must not pull identity state cross-service).
     role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Who acts next, as a field rather than as prose in ``content``. Nullable:
+    # omitting it is the pre-existing behaviour and stays unvalidated, so every
+    # message written before this column existed remains legal.
+    #
+    # Conclair ascribes meaning to **no value here** -- it stores the string it
+    # was given. Deciding whether "Heisenberg" may act requires the Prismind
+    # identity record, and Conclair must not pull identity state cross-service
+    # (same boundary as ``role`` above). The one thing it does enforce is
+    # structural and needs nothing outside the row: see
+    # ``messages_next_participant_close_check``.
+    next_participant: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("project", "msg_id", name="messages_pkey"),
@@ -62,6 +73,31 @@ class Message(Base):
         CheckConstraint(
             f"type IN {MESSAGE_TYPES}",
             name="messages_type_check",
+        ),
+        # A msg that closes its thread names no successor. "Nobody is next" and
+        # "this thread is finished" are the same fact, and the thread is its
+        # keeper (``closes_thread`` -> ``resolved`` / ``resolved_by_msg``), so
+        # the message layer states it once -- by closing -- and never again.
+        #
+        # What this forbids is a *settled thread with a pending successor*: a
+        # row that simultaneously says the work is over and that somebody still
+        # owes a turn. Nothing downstream can act on that, and ``messages`` is
+        # append-only, so it could not be repaired afterwards.
+        #
+        # Note what is deliberately NOT here: a sentinel meaning "no successor".
+        # An earlier draft reserved the string 'none' for that and required it
+        # to accompany a close -- but once tied, it could say nothing the
+        # adjacent ``closes_thread`` did not already say, so it was a second
+        # encoding of one fact, which is the very thing this constraint exists
+        # to prevent. There is now exactly one way to record that a thread has
+        # no successor: close it. (Tier B naysayer on PR #13.)
+        #
+        # Duplicated deliberately in ``services.integrity`` as a pre-write
+        # assert. That one produces the 409 a caller can act on; this one makes
+        # the state unrepresentable if a future write path forgets to ask.
+        CheckConstraint(
+            "closes_thread IS NULL OR next_participant IS NULL",
+            name="messages_next_participant_close_check",
         ),
         Index("idx_messages_thread", "project", "thread_id"),
         Index("idx_messages_type", "project", "type"),

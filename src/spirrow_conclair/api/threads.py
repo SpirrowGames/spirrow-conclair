@@ -97,6 +97,11 @@ async def open_thread(
                 details={"project": project, "thread_id": body.thread_id},
             )
 
+        # Invariant 7 is not asserted on this route, and that is not an
+        # omission: it only has something to say about a msg that closes its
+        # thread, and closes_thread is hardcoded None below -- a thread's
+        # opening message cannot close it. Adding the call here would be a
+        # branch that can never be taken. The DB CHECK still covers the row.
         msg_id = await allocate_next_msg_id(session, project)
 
         thread_orm = Thread(
@@ -131,6 +136,7 @@ async def open_thread(
             tags=list(body.tags),
             embodiment=body.embodiment,
             role=body.role,
+            next_participant=body.next_participant,
         )
         event_orm = ChatroomEvent(
             project=project,
@@ -380,6 +386,12 @@ async def close_thread(
             timestamp=body.timestamp,
             embodiment=body.embodiment,
             role=body.role,
+            # This route always sets closes_thread, so invariant 7 makes NULL
+            # the only value it can carry. Passed through rather than dropped
+            # on purpose: a caller who supplies one has misunderstood what
+            # closing means, and should be told (409) instead of having the
+            # field silently discarded.
+            next_participant=body.next_participant,
             owner_override=body.owner_override,
             owner_override_reason=body.owner_override_reason,
         )

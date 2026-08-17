@@ -99,7 +99,9 @@ alembic/                 # migration
     ├── 0002_messages_embodiment.py
     ├── 0003_actor_read_cursors.py
     ├── 0004_messages_role.py
-    └── 0005_project_control.py
+    ├── 0005_project_control.py
+    ├── 0006_threads_last_msg_num.py
+    └── 0007_messages_next_participant.py
 
 docs/
 ├── api-design.md        # HTTP API 詳細仕様 (T02)
@@ -110,8 +112,8 @@ scripts/
 ├── backup.sh            # 日次 pg_dump → snapshot
 └── restore.sh           # snapshot から DB 復元
 tests/
-├── unit/                # 130 cases (services の pure 部分)
-└── integration/         # 137 cases + 2 perf (testcontainers postgres + httpx ASGITransport)
+├── unit/                # 143 cases (services の pure 部分)
+└── integration/         # 153 cases + 2 perf (testcontainers postgres + httpx ASGITransport)
 ```
 
 ## API レイヤ (`/v1` JSON)
@@ -205,6 +207,25 @@ HTML 自体はこのホストが返すので**ページは 200 で描画され�
 4. reply_to が同 thread 内に存在
 5. references_threads が同 project 内に存在
 6. msg_id ユニーク (PK + advisory_xact_lock で採番衝突防止)
+7. `closes_thread` を持つ msg は `next_participant` を持たない (閉じる msg は後継者を名指さない)
+
+7 が禁じるのは「**決着したスレッドに保留中の後継者が居る**」行 — 仕事は終わったと同時に誰かがまだ
+ターンを負っている、と言う行。下流はそれに対して何もできず、**`messages` は append-only ∴ 後から直せない**
+ので、検出可能にするのではなく表現不能にする。
+
+「次が居ない」と「このスレッドは終わった」は同じ事実で、後者は thread 側 (`status=resolved` /
+`resolved_by_msg`) が持っている ∴ **msg 層はそれを close で一度だけ言い、二度は言わない。**
+∴ **「次が居ない」を表す sentinel 値は置かない。** 初版は `'none'` を予約して close との同時指定を
+必須にしたが、close に縛った時点で隣の `closes_thread` が言う以上のことを何も言えず、1 つの事実の
+2 個目の符号化 = この不変条件が潰そうとしている当のものになる (Tier B naysayer, PR #13)。
+スレッドに後継者が居ないことを記録する方法は **close する 1 つだけ**。
+
+**参加者名は検証しない。予約語も無い** — 誰が動いてよいかの判定には Prismind の identity record が要り、
+Conclair は cross-service の状態を引かない (`role` と同じ境界)。`'none'` も Conclair から見れば
+ただの名前で、それが正当な名前かは Magickit の問い。
+
+DB 側にも同名の CHECK 制約を置く二重化は意図的で、assert 側は呼び出し元が対処できる 409 を返す役、
+CHECK は将来 assert を通らない書き込み経路が生えたときの最後の砦。
 
 audit endpoint (`GET /integrity`) は同条件 + `inconsistent_resolved` (status=resolved XOR resolved_by_msg) を全件 scan で報告。
 
@@ -232,15 +253,15 @@ decide+closes_thread を closed status に投げると `ChatroomStateError`。
 ## テスト方針
 
 ```
-tests/unit/        # 131 cases (services の pure 部分)
+tests/unit/        # 143 cases (services の pure 部分)
   test_status_transition.py    # 全 type × 全 status matrix
   test_permissions.py          # owner check
   test_msg_id_allocator.py     # format/parse round-trip
-  test_integrity.py            # assert_closes_thread_rule
+  test_integrity.py            # assert_closes_thread_rule / assert_next_participant_rule
   test_thread_rollup.py        # 活動 rollup の射影 (all-NULL / 桁埋め)
   test_exceptions.py           # 階層 + details propagation
 
-tests/integration/ # 137 cases + 2 perf, testcontainers postgres:16
+tests/integration/ # 153 cases + 2 perf, testcontainers postgres:16
   conftest.py              # postgres container + alembic + fixtures
   test_api_threads.py      # open / list / get e2e
   test_api_messages.py     # post + transitions + concurrent allocator
@@ -248,13 +269,15 @@ tests/integration/ # 137 cases + 2 perf, testcontainers postgres:16
   test_api_events.py       # audit log filter
   test_api_integrity.py    # injection + project scope + 活動キーの一貫性
   test_api_control.py      # loop control: 既定値 / 422 / 履歴 / INV-4 回帰
+  test_api_next_participant.py # INV-7: close 側 2 route + open_thread + ORM 直挿し (CHECK 単体)
   test_migration_control.py # 0005 の up/down/up (捨てDBで実行)
+  test_migration_next_participant.py # 0007 の up/down/up + 既存行が制約を通ること
   test_ui_routes.py        # /ui page + fragment + form post smoke
   test_ui_control.py       # control ウィジェット: 反映待ち / stale / 拒否
   test_thread_listing_scale.py # [perf] 一覧の実測 (規模を振って wall clock + plan)
 ```
 
-合計 267 cases (unit 130 + integration 137) + perf 2。**CI (`.github/workflows/ci.yml`) が PR ごとに走らせる** (ubuntu-latest, Python 3.11/3.12)。integration は Docker を要求するので、手元に Docker が無いホストではこの CI が唯一の実行場所になる。
+合計 296 cases (unit 143 + integration 153) + perf 2。**CI (`.github/workflows/ci.yml`) が PR ごとに走らせる** (ubuntu-latest, Python 3.11/3.12)。integration は Docker を要求するので、手元に Docker が無いホストではこの CI が唯一の実行場所になる。
 
 `perf` マークは既定の実行から外れる (`-m "not perf"`)。~600k 行を撒いて wall clock を測るので分単位かかる ∴ CI では専用 job で 1 回だけ走り、その出力が「一覧が何ミリ秒か」の記録になる。assert は破滅ガード (5s) だけ — 共有 runner に厳しい閾値を課すと赤が無視される訓練になる。判断に使う数字は出力の方。
 

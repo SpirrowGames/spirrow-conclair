@@ -19,6 +19,7 @@ Invariants enforced (per design v2 §9):
 4. reply_to (when set) must reference a msg in the same thread
 5. references_threads (when set) must all exist in the same project
 6. msg_id uniqueness — enforced by composite PK at the DB layer
+7. a msg with closes_thread set must not also name a next_participant
 """
 
 from __future__ import annotations
@@ -156,6 +157,57 @@ def assert_closes_thread_rule(
                 "thread_id": thread.thread_id,
                 "thread_owner": thread.owner,
                 "author": author,
+            },
+        )
+
+
+def assert_next_participant_rule(
+    *,
+    next_participant: str | None,
+    closes_thread: str | None,
+) -> None:
+    """Invariant 7: a msg that closes its thread names no successor.
+
+    The pair this refuses is a **settled thread with a pending successor** — a
+    row saying both that the work is over and that somebody still owes a turn.
+    Nothing downstream can act on it, and ``messages`` is append-only, so it
+    could not be repaired after the fact.
+
+    "Nobody is next" and "this thread is finished" are the same fact, and the
+    thread is its keeper (``closes_thread`` → ``status='resolved'`` /
+    ``resolved_by_msg``). So there is exactly one way to record that a thread
+    has no successor: close it. Note what that means — **there is no sentinel
+    value here**. An earlier draft reserved ``'none'`` for "nobody is next" and
+    required it to accompany a close, but once tied to the close it could say
+    nothing the adjacent ``closes_thread`` did not already say; a second
+    encoding of one fact is the very thing this invariant exists to prevent.
+    (Tier B naysayer, PR #13.)
+
+    **Call this after** :func:`assert_closes_thread_rule`. This function treats
+    any non-``None`` ``closes_thread`` as "this msg closes its thread", which
+    is only true once that assert has established the value names *this*
+    thread and comes from its owner on a ``decide``.
+
+    Participant names are deliberately **not** checked — not for existence, not
+    against a roster, and no string is reserved. Answering "may Heisenberg act
+    here?" requires the Prismind identity record, and Conclair must not pull
+    identity state cross-service (the boundary ``role`` already draws).
+    Magickit owns that half; this owns only what a single row can answer about
+    itself.
+    """
+    if closes_thread is None:
+        return
+
+    if next_participant is not None:
+        raise ChatroomIntegrityError(
+            f"a msg that closes its thread cannot name a successor, but "
+            f"next_participant='{next_participant}' was supplied alongside "
+            f"closes_thread='{closes_thread}'. Closing the thread IS how "
+            "'nobody is next' is recorded; to hand the thread on instead, name "
+            "the participant and leave closes_thread unset.",
+            details={
+                "next_participant": next_participant,
+                "closes_thread": closes_thread,
             },
         )
 

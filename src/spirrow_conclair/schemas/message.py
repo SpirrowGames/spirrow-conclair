@@ -35,6 +35,9 @@ class Message(BaseModel):
     # ADR-2026-05-27-09 / msg-002 §2: per-msg role the author was acting under.
     # Conclair persists only; Magickit enforces role × allowed_roles.
     role: str | None = None
+    # Who acts next. Persisted verbatim; Magickit validates the name. Null on
+    # a msg that closes its thread — closing IS "nobody is next" (invariant 7).
+    next_participant: str | None = None
 
 
 class PostMessageRequest(BaseModel):
@@ -55,6 +58,13 @@ class PostMessageRequest(BaseModel):
     # this msg. Conclair persists verbatim; Magickit validates against the
     # Prismind identity record's allowed_roles before forwarding.
     role: str | None = None
+    # Who acts next, as a field instead of prose at the end of `content`.
+    # Omitted -> nothing recorded, nothing checked (pre-existing behaviour).
+    # Supplied -> persisted verbatim; no value is reserved and no name is
+    # verified here (that needs the identity record, which is Magickit's). The
+    # only rule is structural: a msg setting closes_thread must not also name a
+    # successor (invariant 7, services.integrity.assert_next_participant_rule).
+    next_participant: str | None = None
     # ADR-2026-06-04-19 D-5: when true, skip the owner==author check for a
     # closes_thread decide so a Tier-C human can force-close a non-owned
     # thread. Conclair only honors the flag (no identity logic) — Magickit is
@@ -89,6 +99,10 @@ class CloseThreadRequest(BaseModel):
     # stamped onto the internal decide msg. Conclair persists verbatim;
     # Magickit validates role × allowed_roles before forwarding.
     role: str | None = None
+    # Accepted only to be refused: this route always sets closes_thread, so
+    # invariant 7 leaves NULL as the single legal value. The field exists so a
+    # caller who supplies one gets a 409 rather than a silent discard.
+    next_participant: str | None = None
     # ADR-2026-06-04-19 D-5: human (Tier-C) force-close of a non-owned thread.
     # See CloseThreadRequest note above — Conclair only honors the flag;
     # Magickit decides (human-only) and supplies the reason for the audit.
