@@ -97,17 +97,11 @@ async def open_thread(
                 details={"project": project, "thread_id": body.thread_id},
             )
 
-        # This path builds its propose msg directly rather than through
-        # post_message_in_session, so invariant 7 has to be asserted here too.
-        # closes_thread is hardcoded None below -- a thread's opening message
-        # cannot close it -- so 'none' is always refused on this route, which is
-        # the right answer: "nobody is next" is not a thing a brand-new thread
-        # can truthfully say.
-        integrity_svc.assert_next_participant_rule(
-            next_participant=body.next_participant,
-            closes_thread=None,
-        )
-
+        # Invariant 7 is not asserted on this route, and that is not an
+        # omission: it only has something to say about a msg that closes its
+        # thread, and closes_thread is hardcoded None below -- a thread's
+        # opening message cannot close it. Adding the call here would be a
+        # branch that can never be taken. The DB CHECK still covers the row.
         msg_id = await allocate_next_msg_id(session, project)
 
         thread_orm = Thread(
@@ -392,12 +386,11 @@ async def close_thread(
             timestamp=body.timestamp,
             embodiment=body.embodiment,
             role=body.role,
-            # This route always sets closes_thread, so it is the one place
-            # 'none' is straightforwardly legal -- and the place it is most
-            # likely to be meant. Still not defaulted: writing a value the
-            # caller did not supply would make a recorded 'none' mean "somebody
-            # closed the thread" rather than "somebody declared no successor",
-            # and the whole point of the field is that it is a declaration.
+            # This route always sets closes_thread, so invariant 7 makes NULL
+            # the only value it can carry. Passed through rather than dropped
+            # on purpose: a caller who supplies one has misunderstood what
+            # closing means, and should be told (409) instead of having the
+            # field silently discarded.
             next_participant=body.next_participant,
             owner_override=body.owner_override,
             owner_override_reason=body.owner_override_reason,

@@ -118,21 +118,25 @@ def test_0007_check_is_vacuously_true_for_pre_existing_rows(scratch_url: str) ->
 
     This is the property that let the constraint ship in the same revision as
     the column (``0004`` could not, for ``role``): every legacy row lands on
-    NULL, and NULL passes ``IS DISTINCT FROM``. If that were wrong the upgrade
-    below would fail while adding the constraint, not later at some write.
+    NULL for ``next_participant``, and a NULL satisfies the check whatever
+    ``closes_thread`` holds. The row that would expose a wrong predicate is a
+    **closing** one — every resolved thread in the archive has one — so that is
+    what this writes. If the predicate were inverted the upgrade below would
+    fail while adding the constraint, not later at some write.
     """
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", scratch_url)
 
-    # Bring the schema to the revision just before this one, then write a row
-    # the way callers did back then — no next_participant, no closes_thread.
+    # Bring the schema to the revision just before this one, then write rows
+    # the way callers did back then — no next_participant column to fill.
     command.upgrade(cfg, "0006")
     asyncio.run(
         _exec_autocommit(
             scratch_url,
             "INSERT INTO threads (project, thread_id, title, owner, status, "
-            "created_at, created_by_msg, affects_threads, tags) VALUES "
-            "('p', 'T-1', 't', 'alice', 'active', now(), 'msg-001', '[]', '[]')",
+            "created_at, created_by_msg, resolved_by_msg, affects_threads, tags) "
+            "VALUES ('p', 'T-1', 't', 'alice', 'resolved', now(), 'msg-001', "
+            "'msg-002', '[]', '[]')",
         )
     )
     asyncio.run(
@@ -144,14 +148,24 @@ def test_0007_check_is_vacuously_true_for_pre_existing_rows(scratch_url: str) ->
             "'[]', '[]', '[]')",
         )
     )
+    asyncio.run(
+        _exec_autocommit(
+            scratch_url,
+            "INSERT INTO messages (project, msg_id, thread_id, author, timestamp, "
+            "type, content, closes_thread, references_threads, related_tasks, tags) "
+            "VALUES ('p', 'msg-002', 'T-1', 'alice', now(), 'decide', 'legacy close', "
+            "'T-1', '[]', '[]', '[]')",
+        )
+    )
 
     command.upgrade(cfg, "head")
 
-    stored = asyncio.run(
-        _scalar(
-            scratch_url,
-            "SELECT next_participant FROM messages WHERE msg_id = :m",
-            {"m": "msg-001"},
+    for msg_id in ("msg-001", "msg-002"):
+        stored = asyncio.run(
+            _scalar(
+                scratch_url,
+                "SELECT next_participant FROM messages WHERE msg_id = :m",
+                {"m": msg_id},
+            )
         )
-    )
-    assert stored is None
+        assert stored is None

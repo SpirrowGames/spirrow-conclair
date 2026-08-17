@@ -20,12 +20,6 @@ MESSAGE_TYPES = (
     "ack",
 )
 
-# The one ``next_participant`` value Conclair ascribes meaning to: "nobody is
-# next." Every other value is an opaque participant name Conclair does not
-# interpret -- naming who may act is the identity registry's job, and that
-# lives in Magickit (see the ``next_participant`` column comment below).
-NEXT_PARTICIPANT_NONE = "none"
-
 
 class Message(Base):
     __tablename__ = "messages"
@@ -61,11 +55,12 @@ class Message(Base):
     # omitting it is the pre-existing behaviour and stays unvalidated, so every
     # message written before this column existed remains legal.
     #
-    # Conclair interprets exactly one value, ``NEXT_PARTICIPANT_NONE`` -- see
-    # ``messages_next_participant_close_check`` below. Participant *names* are
-    # stored verbatim and never checked here: deciding whether "Heisenberg" may
-    # act requires the Prismind identity record, and Conclair must not pull
-    # identity state cross-service (same boundary as ``role`` above).
+    # Conclair ascribes meaning to **no value here** -- it stores the string it
+    # was given. Deciding whether "Heisenberg" may act requires the Prismind
+    # identity record, and Conclair must not pull identity state cross-service
+    # (same boundary as ``role`` above). The one thing it does enforce is
+    # structural and needs nothing outside the row: see
+    # ``messages_next_participant_close_check``.
     next_participant: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
@@ -79,31 +74,29 @@ class Message(Base):
             f"type IN {MESSAGE_TYPES}",
             name="messages_type_check",
         ),
-        # "Nobody is next" and "this thread is finished" are the same fact, and
-        # the thread already carries the second one (``closes_thread`` ->
-        # ``resolved`` / ``resolved_by_msg``). Recording it a second time as a
-        # free-standing claim in a message is what let the two drift apart:
-        # measured over the loop's history, of the three threads whose latest
-        # message said "none", exactly zero had closed with it -- one was closed
-        # 15 minutes later by a *second* message, and two are still open (one for
-        # 37 days), silently, because a settled thread is the one stop the sweep
-        # deliberately does not report.
+        # A msg that closes its thread names no successor. "Nobody is next" and
+        # "this thread is finished" are the same fact, and the thread is its
+        # keeper (``closes_thread`` -> ``resolved`` / ``resolved_by_msg``), so
+        # the message layer states it once -- by closing -- and never again.
         #
-        # So the claim is only writable together with the act. A recorded
-        # ``none`` therefore always means "this thread was closed" -- the same
-        # shape as ``role``, where a recorded value always means "this was
-        # verified".
+        # What this forbids is a *settled thread with a pending successor*: a
+        # row that simultaneously says the work is over and that somebody still
+        # owes a turn. Nothing downstream can act on that, and ``messages`` is
+        # append-only, so it could not be repaired afterwards.
         #
-        # ``IS DISTINCT FROM`` (not ``<>``) because NULL must pass: an omitted
-        # ``next_participant`` is unconstrained, which is what keeps every
-        # pre-existing row legal and needs no backfill.
+        # Note what is deliberately NOT here: a sentinel meaning "no successor".
+        # An earlier draft reserved the string 'none' for that and required it
+        # to accompany a close -- but once tied, it could say nothing the
+        # adjacent ``closes_thread`` did not already say, so it was a second
+        # encoding of one fact, which is the very thing this constraint exists
+        # to prevent. There is now exactly one way to record that a thread has
+        # no successor: close it. (Tier B naysayer on PR #13.)
         #
         # Duplicated deliberately in ``services.integrity`` as a pre-write
         # assert. That one produces the 409 a caller can act on; this one makes
         # the state unrepresentable if a future write path forgets to ask.
         CheckConstraint(
-            f"next_participant IS DISTINCT FROM '{NEXT_PARTICIPANT_NONE}' "
-            "OR closes_thread IS NOT NULL",
+            "closes_thread IS NULL OR next_participant IS NULL",
             name="messages_next_participant_close_check",
         ),
         Index("idx_messages_thread", "project", "thread_id"),

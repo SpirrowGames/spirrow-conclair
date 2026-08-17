@@ -35,8 +35,8 @@ class Message(BaseModel):
     # ADR-2026-05-27-09 / msg-002 §2: per-msg role the author was acting under.
     # Conclair persists only; Magickit enforces role × allowed_roles.
     role: str | None = None
-    # Who acts next. Conclair ascribes meaning to 'none' only (invariant 7);
-    # participant names are persisted verbatim and validated by Magickit.
+    # Who acts next. Persisted verbatim; Magickit validates the name. Null on
+    # a msg that closes its thread — closing IS "nobody is next" (invariant 7).
     next_participant: str | None = None
 
 
@@ -60,10 +60,10 @@ class PostMessageRequest(BaseModel):
     role: str | None = None
     # Who acts next, as a field instead of prose at the end of `content`.
     # Omitted -> nothing recorded, nothing checked (pre-existing behaviour).
-    # Supplied -> persisted verbatim, with exactly one value interpreted:
-    # 'none' is refused unless this msg also closes its thread (invariant 7,
-    # services.integrity.assert_next_participant_rule). Participant names are
-    # not validated here — that needs the identity record, which is Magickit's.
+    # Supplied -> persisted verbatim; no value is reserved and no name is
+    # verified here (that needs the identity record, which is Magickit's). The
+    # only rule is structural: a msg setting closes_thread must not also name a
+    # successor (invariant 7, services.integrity.assert_next_participant_rule).
     next_participant: str | None = None
     # ADR-2026-06-04-19 D-5: when true, skip the owner==author check for a
     # closes_thread decide so a Tier-C human can force-close a non-owned
@@ -99,9 +99,9 @@ class CloseThreadRequest(BaseModel):
     # stamped onto the internal decide msg. Conclair persists verbatim;
     # Magickit validates role × allowed_roles before forwarding.
     role: str | None = None
-    # Stamped onto the internal decide msg. This route always sets
-    # closes_thread, so 'none' is legal here — and this is where it is usually
-    # meant. Not defaulted: see the note at the call site in api/threads.py.
+    # Accepted only to be refused: this route always sets closes_thread, so
+    # invariant 7 leaves NULL as the single legal value. The field exists so a
+    # caller who supplies one gets a 409 rather than a silent discard.
     next_participant: str | None = None
     # ADR-2026-06-04-19 D-5: human (Tier-C) force-close of a non-owned thread.
     # See CloseThreadRequest note above — Conclair only honors the flag;

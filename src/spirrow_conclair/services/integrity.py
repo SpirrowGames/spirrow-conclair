@@ -19,7 +19,7 @@ Invariants enforced (per design v2 §9):
 4. reply_to (when set) must reference a msg in the same thread
 5. references_threads (when set) must all exist in the same project
 6. msg_id uniqueness — enforced by composite PK at the DB layer
-7. next_participant='none' requires closes_thread to be set on the same msg
+7. a msg with closes_thread set must not also name a next_participant
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from spirrow_conclair.exceptions import (
     ChatroomNotFoundError,
 )
 from spirrow_conclair.models import Message, Thread
-from spirrow_conclair.models.message import NEXT_PARTICIPANT_NONE
 from spirrow_conclair.schemas.event import IntegrityIssue
 from spirrow_conclair.services.msg_id_allocator import format_msg_id, parse_msg_id
 
@@ -167,44 +166,49 @@ def assert_next_participant_rule(
     next_participant: str | None,
     closes_thread: str | None,
 ) -> None:
-    """Invariant 7: only a msg that closes its thread may say nobody is next.
+    """Invariant 7: a msg that closes its thread names no successor.
 
-    ``next_participant='none'`` asserts "this thread has no successor", which
-    is the same fact ``closes_thread`` records — and the thread object is
-    already its keeper (``status='resolved'`` / ``resolved_by_msg``). Letting a
-    message assert it independently is what let the two drift: of the three
-    threads in the loop's history whose latest msg said ``none``, **zero**
-    closed with it. One was closed 15 minutes later by a second message; two
-    are still open — one for 37 days — and neither announced itself, because a
-    settled thread is precisely the stop the sweep does not report.
+    The pair this refuses is a **settled thread with a pending successor** — a
+    row saying both that the work is over and that somebody still owes a turn.
+    Nothing downstream can act on it, and ``messages`` is append-only, so it
+    could not be repaired after the fact.
 
-    So the claim is writable only together with the act, and a recorded
-    ``none`` always means "this thread was closed" — the same shape ``role``
-    has, where a recorded value always means "this was verified".
+    "Nobody is next" and "this thread is finished" are the same fact, and the
+    thread is its keeper (``closes_thread`` → ``status='resolved'`` /
+    ``resolved_by_msg``). So there is exactly one way to record that a thread
+    has no successor: close it. Note what that means — **there is no sentinel
+    value here**. An earlier draft reserved ``'none'`` for "nobody is next" and
+    required it to accompany a close, but once tied to the close it could say
+    nothing the adjacent ``closes_thread`` did not already say; a second
+    encoding of one fact is the very thing this invariant exists to prevent.
+    (Tier B naysayer, PR #13.)
 
     **Call this after** :func:`assert_closes_thread_rule`. This function treats
-    any non-``None`` ``closes_thread`` as sufficient, which is only true once
-    that assert has established the value names *this* thread and comes from
-    its owner on a ``decide``. Reversing the order would let a msg satisfy
-    invariant 7 by naming somebody else's thread.
+    any non-``None`` ``closes_thread`` as "this msg closes its thread", which
+    is only true once that assert has established the value names *this*
+    thread and comes from its owner on a ``decide``.
 
     Participant names are deliberately **not** checked — not for existence, not
-    against a roster. Answering "may Heisenberg act here?" requires the
-    Prismind identity record, and Conclair must not pull identity state
-    cross-service (the boundary ``role`` already draws). Magickit owns that
-    half; this owns only what a single row can answer about itself.
+    against a roster, and no string is reserved. Answering "may Heisenberg act
+    here?" requires the Prismind identity record, and Conclair must not pull
+    identity state cross-service (the boundary ``role`` already draws).
+    Magickit owns that half; this owns only what a single row can answer about
+    itself.
     """
-    if next_participant != NEXT_PARTICIPANT_NONE:
+    if closes_thread is None:
         return
 
-    if closes_thread is None:
+    if next_participant is not None:
         raise ChatroomIntegrityError(
-            f"next_participant='{NEXT_PARTICIPANT_NONE}' requires closes_thread to be "
-            "set on the same msg: a thread with no successor is a thread that is "
-            "finished, and finishing it is what closes_thread does. To hand off "
-            "without closing, name the participant (or 'human'); to close, set "
-            "closes_thread.",
-            details={"next_participant": next_participant, "closes_thread": None},
+            f"a msg that closes its thread cannot name a successor, but "
+            f"next_participant='{next_participant}' was supplied alongside "
+            f"closes_thread='{closes_thread}'. Closing the thread IS how "
+            "'nobody is next' is recorded; to hand the thread on instead, name "
+            "the participant and leave closes_thread unset.",
+            details={
+                "next_participant": next_participant,
+                "closes_thread": closes_thread,
+            },
         )
 
 

@@ -1,35 +1,39 @@
-"""messages: add next_participant, and tie 'none' to closing the thread
+"""messages: add next_participant, and forbid a successor on a closing msg
 
 Revision ID: 0007
 Revises: 0006
 Create Date: 2026-08-17
 
 Who acts next is currently prose at the end of ``content`` (``NEXT: <name>``).
-This adds the field half of that -- and, in the same revision, the one rule
-Conclair can enforce about it without reaching outside the row.
+This adds the field half -- and, in the same revision, the one rule Conclair
+can enforce about it without reaching outside the row: a msg that closes its
+thread names no successor.
+
+**What it forbids.** A row that says both "the work is over" and "somebody
+still owes a turn". Nothing downstream can act on that pair, and ``messages``
+is append-only, so it could not be repaired after the fact. "Nobody is next"
+and "this thread is finished" are the same fact, and the thread already keeps
+it (``closes_thread`` -> ``threads.status='resolved'`` / ``resolved_by_msg``);
+the message layer states it once, by closing, and never again.
+
+**What is deliberately absent.** No sentinel value meaning "no successor". An
+earlier draft of this revision reserved the string ``'none'`` for that and
+required it to accompany a close -- but once tied to the close it could say
+nothing the adjacent ``closes_thread`` did not already say, making it a second
+encoding of a single fact. That is the failure this constraint exists to
+prevent, so it was dropped: there is exactly one way to record that a thread
+has no successor, and it is to close the thread. (Tier B naysayer, PR #13.)
 
 **Why the constraint ships with the column rather than after it.** ``0004``
 (role) could not constrain its column, because pre-existing rows had no value
-to satisfy a rule with and backfilling one would have fabricated an attestation.
-Here every existing row gets ``NULL``, ``NULL`` passes (``IS DISTINCT FROM``),
-and the check is therefore vacuously true on arrival. There is no window in
-which the column exists unconstrained, so there is no cohort of legacy rows to
-grandfather in later.
+to satisfy a rule with and backfilling one would have fabricated an
+attestation. Here every existing row gets ``NULL``, and a NULL
+``next_participant`` satisfies the check whatever ``closes_thread`` holds, so
+it is vacuously true on arrival -- including for the rows that already close
+their threads. There is no window in which the column exists unconstrained,
+and no legacy cohort to grandfather in later.
 
-**The rule.** ``next_participant = 'none'`` asserts "nobody is next", which is
-the same fact as "this thread is finished" -- and the thread already records
-that, via ``closes_thread`` -> ``threads.status='resolved'`` /
-``resolved_by_msg``. Two records of one fact drifted apart in practice: across
-the loop's history the three threads whose latest message said ``none``
-included zero that closed with it. One was closed 15 minutes later by a
-*separate* message; the other two are still open (one for 37 days) and silent,
-because "settled" is the single stop the sweep intentionally does not report.
-
-Tying them makes the divergent state unrepresentable rather than merely
-detectable -- which matters because ``messages`` is append-only, so a row
-written wrong cannot be repaired afterwards.
-
-Participant *names* are not validated here or anywhere in Conclair: deciding
+Participant names are not validated here or anywhere in Conclair: deciding
 whether a name may act needs the Prismind identity record, and Conclair must
 not pull identity state cross-service. That check belongs to Magickit. This
 revision constrains only what one row can answer about itself.
@@ -57,7 +61,7 @@ def upgrade() -> None:
     op.create_check_constraint(
         CHECK_NAME,
         "messages",
-        "next_participant IS DISTINCT FROM 'none' OR closes_thread IS NOT NULL",
+        "closes_thread IS NULL OR next_participant IS NULL",
     )
 
 
