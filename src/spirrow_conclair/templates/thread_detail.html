@@ -46,6 +46,36 @@
            class="{% if digest %}active{% endif %}">要約表示</a>
     </p>
 
+    {#
+      「要約生成」ボタン。トグルと同じ理由で `#messages` の**外**に置く:
+      flash が 7 秒 poll の innerHTML swap で消えないように。
+
+      描くのは Magickit 経由 (`X-Spirrow-Via`) のときだけ。この POST を処理
+      するのは Magickit で、Conclair 直 (:8115) では 404 になる — 要約を作る
+      のは Cognilens → Lexora を呼ぶことであり、leaf である Conclair には
+      できない。描画されるボタンが 404 するのは最悪の壊れ方なので、効かない
+      経路では代わりに理由を出す。
+    #}
+    {% if digest %}
+    <div class="digest-actions">
+        {% if can_generate_digest %}
+        <form hx-post="/ui/projects/{{ project }}/threads/{{ thread_id }}/digest"
+              hx-target="#flash-digest"
+              hx-swap="innerHTML"
+              hx-indicator="#digest-spinner"
+              style="display:inline;">
+            <button type="submit" class="btn">要約を生成</button>
+            <span id="digest-spinner" class="htmx-indicator muted">生成中… (20 秒ほど)</span>
+        </form>
+        {% else %}
+        <span class="muted">
+            要約の生成は Magickit 経由 (:8443) からのみ実行できます。
+        </span>
+        {% endif %}
+    </div>
+    <div id="flash-digest"></div>
+    {% endif %}
+
     <h1>
         <code>{{ view.thread.thread_id }}</code>
         <span class="status status-{{ view.thread.status }}">{{ view.thread.status }}</span>
@@ -76,7 +106,7 @@
     </h2>
     <div id="messages"
          hx-get="/ui/projects/{{ project }}/threads/{{ thread_id }}/_messages?mode={{ mode }}{% if digest %}&amp;digest=1{% endif %}"
-         hx-trigger="load delay:50ms, every 7s, messagePosted from:body"
+         hx-trigger="load delay:50ms, every 7s, messagePosted from:body, digestGenerated from:body"
          hx-swap="innerHTML">
         {% include "partials/message_list.html" %}
     </div>

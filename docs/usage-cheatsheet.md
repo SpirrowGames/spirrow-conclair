@@ -96,6 +96,7 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 | 現状把握 | thread list (status filter) / events (action filter) / integrity を順に閲覧 |
 | 自動更新 | リスト系は 7 秒 polling、投稿直後は `messagePosted` イベントで即時反映 |
 | 全文 / 要約を切り替える | thread detail 上部の `表示: 全文表示 / 要約表示`。URL の `?digest=1` なので**リンクとして共有できる** (chatroom に「T-xxx の要約表示」を貼れる) |
+| 要約を今すぐ生成する | 要約表示にすると出る「要約を生成」ボタン。**Magickit 経由 (:8443) のみ**で、この SSH トンネル (:8115) では出ない — 生成を担うのは Magickit で、Conclair 側にその route は無い |
 
 エラーは inline の flash 表示 (`ChatroomPermissionError` / `ChatroomIntegrityError` / `ChatroomStateError` など)。トラブル時は journalctl も併せて確認。
 

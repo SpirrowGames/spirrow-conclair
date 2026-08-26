@@ -76,6 +76,24 @@ def _render(
     )
 
 
+#: Header Magickit's ``/ui`` proxy sets on every forwarded request.
+#:
+#: The 要約生成 button posts to a route **Magickit** claims (it is the
+#: producer; Cognilens and the GPU are on that side), so through a direct
+#: :8115 tunnel that POST would 404. Conclair therefore renders the button
+#: only when it can see the request came through Magickit. A config flag
+#: here could not do it: the same process serves both paths at once.
+#:
+#: Spoofable, and that is fine -- it decides what to *render*, not what is
+#: allowed, the same stance as ``actor`` in loop control.
+VIA_HEADER = "X-Spirrow-Via"
+VIA_MAGICKIT = "magickit"
+
+
+def _via_magickit(request: Request) -> bool:
+    return request.headers.get(VIA_HEADER, "").lower() == VIA_MAGICKIT
+
+
 def _messages_ctx(
     project: str,
     thread_id: str,
@@ -352,7 +370,14 @@ async def thread_detail_page(
     digest: Annotated[bool, Query()] = False,
 ) -> HTMLResponse:
     ctx = _base_ctx(project, "threads")
-    ctx.update({"thread_id": thread_id, "mode": mode, "digest": digest})
+    ctx.update(
+        {
+            "thread_id": thread_id,
+            "mode": mode,
+            "digest": digest,
+            "can_generate_digest": _via_magickit(request),
+        }
+    )
 
     try:
         view = await api_get_thread(

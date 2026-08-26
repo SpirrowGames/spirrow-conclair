@@ -308,6 +308,13 @@ textarea {
    Existing variables only; no new asset files, so nothing here has to be
    kept sha256-identical with Magickit's /static copy. */
 .digest-toggle a.active { font-weight: 600; }
+.digest-actions { margin-top: 6px; }
+/* HTMX toggles `.htmx-request` on the indicator's nearest request scope;
+   this is the standard opt-in styling, kept here so no CDN stylesheet is
+   needed for it. */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator { display: inline; }
 
 .digest-panel {
     border: 1px solid var(--border);

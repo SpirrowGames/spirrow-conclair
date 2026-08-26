@@ -169,9 +169,10 @@ async def test_a_stale_digest_names_the_shortfall(client: AsyncClient) -> None:
     assert head in body
     assert "以降 2 件は未反映" in body
     assert "古い可能性があります" in body
-    # Conclair cannot re-generate, and says so rather than offering a button
-    # that would 404.
-    assert "再生成は Conclair からは指示できません" in body
+    # The panel states the fact and stops. Whether re-generation is possible
+    # depends on the entry point, and the control above already says so per
+    # path -- claiming it here would contradict the button when it is drawn.
+    assert "指示できません" not in body
 
 
 async def test_a_truncated_digest_is_labelled(client: AsyncClient) -> None:
@@ -268,3 +269,88 @@ async def test_the_message_count_is_the_rollup_not_the_filtered_list(
 
     assert "(3)" in body
     assert "(1)" not in body
+
+
+# ---- the generate button, and where it is honest about not working -----
+
+
+async def test_the_button_appears_only_via_magickit(client: AsyncClient) -> None:
+    """The POST is Magickit's route; on :8115 direct it would 404.
+
+    A rendered button that 404s is the worst failure shape available here --
+    it reads as a bug in the page rather than as the wrong entry point -- so
+    Conclair draws it only when the proxy's header says the request came
+    through Magickit.
+    """
+    await _open(client, "T-1")
+
+    direct = await client.get(
+        f"/ui/projects/{PROJECT}/threads/T-1", params={"digest": "1"}
+    )
+    proxied = await client.get(
+        f"/ui/projects/{PROJECT}/threads/T-1",
+        params={"digest": "1"},
+        headers={"X-Spirrow-Via": "magickit"},
+    )
+
+    assert "要約を生成" not in direct.text
+    # Instead of a dead button, the reason.
+    assert "Magickit 経由" in direct.text
+    assert "要約を生成" in proxied.text
+
+
+async def test_the_button_posts_to_the_route_magickit_claims(
+    client: AsyncClient,
+) -> None:
+    await _open(client, "T-1")
+
+    body = await _page_via(client, "T-1")
+
+    assert f"/ui/projects/{PROJECT}/threads/T-1/digest" in body
+
+
+async def test_the_button_and_its_flash_are_outside_the_swap_target(
+    client: AsyncClient,
+) -> None:
+    """Otherwise the 7-second poll deletes the flash that explains a refusal."""
+    await _open(client, "T-1")
+
+    page = await _page_via(client, "T-1")
+    fragment = await _fragment(client, "T-1", digest="1")
+
+    assert 'id="flash-digest"' in page
+    assert 'id="flash-digest"' not in fragment
+    assert "要約を生成" not in fragment
+
+
+async def test_the_container_listens_for_the_digest_event(
+    client: AsyncClient,
+) -> None:
+    """Magickit answers a successful generate with HX-Trigger: digestGenerated."""
+    await _open(client, "T-1")
+
+    body = await _page(client, "T-1", digest="1")
+
+    assert "digestGenerated from:body" in body
+
+
+async def test_the_button_is_absent_in_the_full_view(client: AsyncClient) -> None:
+    """Nothing to generate for a view that is not showing a digest."""
+    await _open(client, "T-1")
+
+    body = await _page_via(client, "T-1", digest=None)
+
+    assert "要約を生成" not in body
+
+
+async def _page_via(
+    client: AsyncClient, thread_id: str, *, digest: str | None = "1"
+) -> str:
+    params = {"digest": digest} if digest else {}
+    r = await client.get(
+        f"/ui/projects/{PROJECT}/threads/{thread_id}",
+        params=params,
+        headers={"X-Spirrow-Via": "magickit"},
+    )
+    assert r.status_code == 200, r.text
+    return r.text
