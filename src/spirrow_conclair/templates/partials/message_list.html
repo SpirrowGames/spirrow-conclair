@@ -1,3 +1,6 @@
+{% if digest_view %}
+    {% include "partials/digest_panel.html" %}
+{% else %}
 {% if view.messages %}
     {% for m in view.messages %}
     <article class="msg msg-{{ m.type }}">
@@ -30,4 +33,5 @@
     {% endfor %}
 {% else %}
     <p class="muted">no messages yet</p>
+{% endif %}
 {% endif %}

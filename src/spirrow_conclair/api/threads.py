@@ -2,7 +2,8 @@
 
 POST /v1/projects/{project}/threads      — open_thread
 GET  /v1/projects/{project}/threads      — list_threads
-GET  /v1/projects/{project}/threads/{id} — get_thread (mode=full|summary)
+GET  /v1/projects/{project}/threads/{id} — get_thread (mode=full|summary,
+                                           optional include_digest)
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from spirrow_conclair.schemas import (
     ThreadView,
 )
 from spirrow_conclair.services import integrity as integrity_svc
+from spirrow_conclair.services.digest import fetch_digest_response
 from spirrow_conclair.services.msg_id_allocator import allocate_next_msg_id, parse_msg_id
 from spirrow_conclair.services.permissions import assert_owner_can_close
 from spirrow_conclair.services.thread_rollup import (
@@ -302,6 +304,13 @@ async def get_thread(
     thread_id: ThreadIdPath,
     session: SessionDep,
     mode: Annotated[Literal["full", "summary"], Query()] = "full",
+    # Orthogonal to `mode`, and deliberately a separate parameter rather
+    # than a third `mode` value. `mode=summary` filters the *messages*
+    # (decide-only on a resolved thread) and mindwire's read tools depend
+    # on that meaning; the LLM digest is a different object under a
+    # different name. Defaults off so no existing caller pays for a field
+    # it does not read.
+    include_digest: Annotated[bool, Query()] = False,
 ) -> ThreadView:
     thread = await session.scalar(
         select(Thread).where(
@@ -334,10 +343,27 @@ async def get_thread(
     # shortest.
     rollup = await fetch_thread_rollup(session, project=project, thread_id=thread_id)
 
+    # The rollup already in hand is passed through, so `thread_last_msg_id`
+    # in the digest block is the *same* value `thread.last_msg_id` reports
+    # and the embed costs one indexed row lookup plus one bounded count --
+    # no second aggregate. Embedding rather than making the caller do a
+    # second request is the point: `behind_by` is a statement about the
+    # messages this same response carries, and two requests would be two
+    # statements about two moments (see thread_rollup's note on values
+    # that are individually plausible and jointly false).
+    digest = (
+        await fetch_digest_response(
+            session, project=project, thread_id=thread_id, rollup=rollup
+        )
+        if include_digest
+        else None
+    )
+
     return ThreadView(
         thread=_thread_schema(thread, rollup),
         messages=[MessageSchema.model_validate(m) for m in msg_rows],
         mode=mode,
+        digest=digest,
     )
 
 

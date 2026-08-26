@@ -237,6 +237,55 @@ async def assert_reply_to_in_thread(
         )
 
 
+async def assert_msg_in_thread(
+    session: AsyncSession,
+    *,
+    project: str,
+    thread_id: str,
+    msg_id: str,
+    field: str,
+) -> None:
+    """A named field must reference an existing msg in this thread.
+
+    The general form of ``assert_reply_to_in_thread`` above, for callers
+    that point at a msg from outside ``messages`` -- currently the digest
+    endpoints (``source_last_msg_id`` / ``target_msg_id``), which have no
+    FK for the same reason ``actor_read_cursors`` has none.
+
+    ``assert_reply_to_in_thread`` deliberately does *not* delegate here:
+    its ``None`` short-circuit is part of its contract and is covered by
+    its own tests. The overlap is two similar queries, not a missing
+    abstraction.
+
+    Scoping on ``thread_id`` is the whole point. ``msg_id`` is allocated
+    project-wide (``msg_id_allocator``), so a check that only filtered on
+    ``project`` would accept a sibling thread's msg -- and a digest whose
+    coverage key belongs to another thread can never be measured.
+
+    Args:
+        session: Open session.
+        project: Project scope.
+        thread_id: The thread the msg must belong to.
+        msg_id: The msg id to verify.
+        field: Name of the field being checked, for the error message.
+
+    Raises:
+        ChatroomIntegrityError: If no such msg exists in this thread.
+    """
+    result = await session.execute(
+        select(Message.msg_id).where(
+            Message.project == project,
+            Message.msg_id == msg_id,
+            Message.thread_id == thread_id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise ChatroomIntegrityError(
+            f"{field} '{msg_id}' does not exist in thread '{thread_id}'",
+            details={field: msg_id, "thread_id": thread_id},
+        )
+
+
 async def assert_references_threads_exist(
     session: AsyncSession,
     *,

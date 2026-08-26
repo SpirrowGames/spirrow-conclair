@@ -16,11 +16,34 @@
         <a href="/ui/projects/{{ project }}/threads">← threads</a>
         &nbsp;|&nbsp;
         mode:
-        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=full"
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=full{% if digest %}&amp;digest=1{% endif %}"
            class="{% if mode == 'full' %}active{% endif %}">full</a>
         /
-        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=summary"
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=summary{% if digest %}&amp;digest=1{% endif %}"
            class="{% if mode == 'summary' %}active{% endif %}">summary</a>
+    </p>
+
+    {#
+      表示切替。plain <a> によるフルページ遷移で、HTMX swap にはしない。
+
+      - サーバ駆動のクエリパラメータにするのは、すぐ上の `mode` が既にその
+        流儀であり、状態がページ単位の二値 (per-message ではない) だから。
+        URL に入るので**リンクとして共有できる** — agent が chatroom に
+        「T-xxx の要約表示」を貼れる。
+      - `#messages` の innerHTML だけを差し替えないのは、`hx-get` が
+        `#messages` **自身**に付いているため。内側だけ入れ替えるとコンテナ
+        の古い URL が残り、次の 7 秒 poll で表示が戻ってしまう。
+      - このページが重くなったら、fragment 側でコンテナ要素ごと描いて
+        `hx-swap="outerHTML"` にするのが筋。`innerHTML` swap への「改善」は
+        上記の理由で壊れる。
+    #}
+    <p class="muted digest-toggle" role="group" aria-label="表示切替">
+        表示:
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode={{ mode }}"
+           class="{% if not digest %}active{% endif %}">全文表示</a>
+        /
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode={{ mode }}&amp;digest=1"
+           class="{% if digest %}active{% endif %}">要約表示</a>
     </p>
 
     <h1>
@@ -45,11 +68,14 @@
 </section>
 
 <section class="card">
-    <h2>messages
-        <span class="muted" style="font-size: 0.85em;">({{ view.messages | length }})</span>
+    {# `view.thread.msg_count` (the rollup), not `view.messages | length`:
+       under mode=summary the list is filtered down to the decide msg, so
+       counting the rendered rows reports "1" for a 40-message thread. #}
+    <h2>{% if digest %}要約{% else %}messages{% endif %}
+        <span class="muted" style="font-size: 0.85em;">({{ view.thread.msg_count }})</span>
     </h2>
     <div id="messages"
-         hx-get="/ui/projects/{{ project }}/threads/{{ thread_id }}/_messages?mode={{ mode }}"
+         hx-get="/ui/projects/{{ project }}/threads/{{ thread_id }}/_messages?mode={{ mode }}{% if digest %}&amp;digest=1{% endif %}"
          hx-trigger="load delay:50ms, every 7s, messagePosted from:body"
          hx-swap="innerHTML">
         {% include "partials/message_list.html" %}

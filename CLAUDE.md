@@ -49,12 +49,14 @@ src/spirrow_conclair/
 ├── db.py                # async engine / session factory / get_session dep
 ├── models/              # SQLAlchemy ORM
 │   ├── __init__.py      # Base + re-export
+│   ├── digest.py        # ThreadDigest (外部 producer が書く要約の保管庫)
 │   ├── thread.py        # Thread (status CHECK 制約付き)
 │   ├── message.py       # Message (composite FK to threads, type CHECK)
 │   ├── event.py         # ChatroomEvent (audit log, append-only)
 │   └── project_control.py # ProjectControl (desired/observed) + History
 ├── schemas/             # pydantic request/response
 │   ├── __init__.py      # forward-ref resolution (model_rebuild)
+│   ├── digest.py
 │   ├── thread.py
 │   ├── message.py
 │   └── event.py
@@ -63,6 +65,7 @@ src/spirrow_conclair/
 │   ├── integrity.py          # pre-write asserts + audit_project (full report)
 │   ├── permissions.py        # owner check (close 用)
 │   ├── msg_id_allocator.py   # advisory_xact_lock + numeric ordering
+│   ├── digest.py             # 要約の読み出し + 被覆範囲 (behind_by / stale) の導出
 │   └── thread_rollup.py      # 活動 rollup (last_msg_id / msg_count / last_activity_at)
 ├── api/                 # FastAPI routers (/v1 JSON API)
 │   ├── __init__.py      # router collection
@@ -71,6 +74,7 @@ src/spirrow_conclair/
 │   ├── messages.py           # POST /threads/{id}/messages + post_message_in_session
 │   ├── events.py             # GET /events
 │   ├── integrity.py          # GET /integrity (audit report)
+│   ├── digest.py             # PUT/GET .../digest (保管のみ。LLM は呼ばない)
 │   └── control.py            # loop control (HOLD/RESUME) desired/observed
 ├── web/                 # /ui routes (Jinja2 + HTMX, T15-T17)
 │   ├── __init__.py      # ui_router export
@@ -85,7 +89,7 @@ src/spirrow_conclair/
 │   ├── events.html      # filter form + audit table
 │   ├── integrity.html   # audit body (auto-poll)
 │   └── partials/        # HTMX swap targets (thread_rows, message_list,
-│                        # event_rows, integrity_body, flash)
+│                        # digest_panel, event_rows, integrity_body, flash)
 ├── static/              # served at /static/
 │   ├── css/conclair.css # CSS variables theme (~270 行)
 │   ├── js/conclair.js   # localStorage author / recent projects, hx-vals inject
@@ -101,7 +105,8 @@ alembic/                 # migration
     ├── 0004_messages_role.py
     ├── 0005_project_control.py
     ├── 0006_threads_last_msg_num.py
-    └── 0007_messages_next_participant.py
+    ├── 0007_messages_next_participant.py
+    └── 0008_thread_digests.py
 
 docs/
 ├── api-design.md        # HTTP API 詳細仕様 (T02)
@@ -127,7 +132,9 @@ tests/
 | `POST /v1/projects/{p}/threads/{tid}/messages` | msg post + 自動 status transition |
 | `POST /v1/projects/{p}/threads/{tid}/close` | owner-only shortcut for type=decide+closes_thread |
 | `GET /v1/projects/{p}/threads` | thread 一覧 (status / owner filter, pagination) |
-| `GET /v1/projects/{p}/threads/{tid}` | thread + msgs (mode=full|summary) |
+| `GET /v1/projects/{p}/threads/{tid}` | thread + msgs (mode=full|summary, 任意 `include_digest`) |
+| `PUT /v1/projects/{p}/threads/{tid}/digest` | 外部 producer が作った要約を保管 (upsert) |
+| `GET /v1/projects/{p}/threads/{tid}/digest` | 要約 + 被覆範囲 (未生成でも 200 + `present:false`) |
 | `GET /v1/projects/{p}/events` | audit log (action / thread_id / since/until filter) |
 | `GET /v1/projects/{p}/integrity` | invariant audit report (常に 200) |
 | `GET /v1/projects/{p}/control` | loop 制御状態 (**常に 200**。未設定は `configured:false` + 既定 `run`) |
@@ -150,6 +157,49 @@ tests/
 認証はしない。tailnet が信頼境界であり、`actor` は監査記録であって認証ではない
 (既存の `_is_human` と同じ立場)。
 
+### thread digest (要約)
+
+**Conclair は要約を作らない。** producer は Magickit (Cognilens → Lexora の
+`light` tier) で、ここは `PUT` されたものを保管し、被覆範囲を添えて返す倉庫。
+`project_control` の `observed_*` と同じ構図 — 外部が報告し、Conclair は記録し、
+UI は「その記録がどれだけ古いか」を言う。∴ `producer` / `model` / `tier` は
+**記録であって検証結果ではない** (`actor` と同じ立場)。検証するには外を呼ぶ
+ことになり、leaf である以上それはできない。
+
+- **freshness key は `source_last_msg_id`。** `messages` は append-only で行は
+  不変 ∴「msg-N まで対象」は永久に真であり、cache timestamp のように「既に
+  嘘になっている」ことがない。`stale ⇔ behind_by > 0`
+- **`behind_by` はサーバ側で導出**する (`services/digest.py`)。`messages` を
+  **`thread_id` で絞った COUNT**。`msg_id` は project 全体の連番なので、連番の
+  引き算も `thread.msg_count - source_msg_count` も**兄弟スレッドの msg を
+  数える** (`thread_rollup` / `api/read_cursor` と同根の罠)
+- **`source_msg_count` は provenance で、判定には使わない。** producer が長い
+  スレッドを窓で切ったときは thread の件数より小さい ∴ 引き算すると「窓で
+  切ったこと」が「古いこと」として報告される
+- **`chatroom_events` に書かない。** 理由 2 つ、どちらか一方でも十分:
+  (1) Magickit の稼働状況ページは `GET /events?limit=1` を「稼働中の根拠」に
+  使う ∴ digest 書き込みが出ると死んだループを「動いている」と表示する。
+  (2) `EventAction` は閉じた `Literal` を**行ごとに** validate する一方 DB 列に
+  CHECK は無い ∴ 未登録 action は INSERT が通り、その後 `GET /events` 全体を
+  500 にする。詳細は `docs/api-design.md` §1.7
+- **`mode=summary` と `digest` は別物。** 前者は「resolved thread で decide msg
+  だけ返す」message フィルタで mindwire の read tool が依存している。後者は
+  LLM 要約という別オブジェクト ∴ `mode` の第 3 の値にしない
+- **「生成中」表示は持たない。** 正直な「生成中」には lease (誰が・いつ・いつ
+  失効) が必要で、producer が死ぬとフラグは永久に「生成中」になる。Conclair は
+  timer も job 状態も持たず、leaf 制約により producer に問い合わせられない ∴
+  期限切れにできない。代わりに「不在 + 既存の 7 秒 poll」で済ませる。生成中
+  表示が要るなら正当な所有者は Magickit (自分の in-flight を知っている側)
+- **UI トグルはフルページ遷移** (`?digest=1`)。`hx-get` は `#messages` 自身に
+  付いており `hx-swap="innerHTML"` なので、内側だけ差し替えるとコンテナの古い
+  URL が残り**次の 7 秒 poll で表示が戻る**。要約パネルは逆に `#messages` の
+  **内側**に置く — staleness 行は messages と同じ周期で再計算されなければ
+  意味がない (外に出すと新しい msg が届いても「反映済み」と言い続ける)
+- **partial の context は `_messages_ctx` 1 本から作る。** page の
+  `{% include %}` と 7 秒 fragment の 2 経路があり、fragment 側は以前 `mode` を
+  渡していなかった。片方しか供給しないキーで分岐すると、ロード時は正しく
+  7 秒後に化ける
+
 エラー envelope: `{error_type, error, details?}` 統一。HTTP code は `error_type` ベースで決定 (`api/error_handlers.py`)。
 
 ## UI レイヤ (`/ui` HTML + HTMX)
@@ -161,8 +211,8 @@ tests/
 | `GET /ui/` | landing (localStorage の recent projects + project 入力) |
 | `GET /ui/projects/{p}/threads` | thread 一覧 page |
 | `GET /ui/projects/{p}/threads/_rows` | thread rows partial (polling target) |
-| `GET /ui/projects/{p}/threads/{tid}` | thread 詳細 page (full \| summary) |
-| `GET /ui/projects/{p}/threads/{tid}/_messages` | messages partial |
+| `GET /ui/projects/{p}/threads/{tid}` | thread 詳細 page (`mode=full\|summary` × `digest=1`) |
+| `GET /ui/projects/{p}/threads/{tid}/_messages` | messages (または要約) partial。`digest` を引き継ぐ |
 | `GET /ui/projects/{p}/events` / `_rows` | events page + partial |
 | `GET /ui/projects/{p}/integrity` / `_body` | audit report page + partial |
 | `POST /ui/projects/{p}/threads` | open_thread form (success → `HX-Redirect`) |
@@ -259,6 +309,7 @@ tests/unit/        # 143 cases (services の pure 部分)
   test_msg_id_allocator.py     # format/parse round-trip
   test_integrity.py            # assert_closes_thread_rule / assert_next_participant_rule
   test_thread_rollup.py        # 活動 rollup の射影 (all-NULL / 桁埋め)
+  test_digest_schemas.py       # scope↔target_msg_id の整合 / CHECK との一致
   test_exceptions.py           # 階層 + details propagation
 
 tests/integration/ # 153 cases + 2 perf, testcontainers postgres:16
@@ -271,6 +322,9 @@ tests/integration/ # 153 cases + 2 perf, testcontainers postgres:16
   test_api_control.py      # loop control: 既定値 / 422 / 履歴 / INV-4 回帰
   test_api_next_participant.py # INV-7: close 側 2 route + open_thread + ORM 直挿し (CHECK 単体)
   test_migration_control.py # 0005 の up/down/up (捨てDBで実行)
+  test_api_digest.py       # digest: 往復 / 未生成 200 / 兄弟スレッド 409 / events 不変
+  test_ui_digest.py        # 全文↔要約トグル / poll URL / page と fragment の一致
+  test_migration_digests.py # 0008 の up/down/up + **部分 unique index の述語**
   test_migration_next_participant.py # 0007 の up/down/up + 既存行が制約を通ること
   test_ui_routes.py        # /ui page + fragment + form post smoke
   test_ui_control.py       # control ウィジェット: 反映待ち / stale / 拒否

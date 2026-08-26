@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from spirrow_conclair.schemas.digest import ThreadDigestResponse
+
 if TYPE_CHECKING:
     from spirrow_conclair.schemas.message import Message
 
@@ -107,10 +109,26 @@ class ThreadListResponse(BaseModel):
 
 
 class ThreadView(BaseModel):
-    """Response for GET /threads/{thread_id} — thread + (filtered) messages."""
+    """Response for GET /threads/{thread_id} — thread + (filtered) messages.
+
+    **``mode`` and ``digest`` are orthogonal, and must stay so.**
+    ``mode=summary`` means "on a resolved thread, return only the decide
+    msg" — a filter over the messages humans and agents wrote, which
+    mindwire's read tools depend on. The LLM-generated ``digest`` is a
+    different object with a different name; it is not a third ``mode``
+    value, and folding it in would silently change what existing callers
+    get.
+
+    ``digest`` has three states, and they are distinct on purpose:
+
+    - ``null`` — you did not pass ``include_digest``.
+    - an object with ``present: false`` — you asked, nothing is stored.
+    - an object with ``present: true`` — the digest, with its coverage.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
     thread: Thread
     messages: list["Message"]
     mode: Literal["full", "summary"]
+    digest: ThreadDigestResponse | None = None
