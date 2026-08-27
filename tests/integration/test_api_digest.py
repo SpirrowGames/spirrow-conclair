@@ -497,3 +497,164 @@ async def test_mode_and_include_digest_are_orthogonal(client: AsyncClient) -> No
     assert body["thread"]["msg_count"] == 3
     assert body["digest"]["thread_msg_count"] == 3
     assert first != head
+
+
+# --- style selection -----------------------------------------------------
+#
+# The gap these close: every earlier test here either pinned the same style
+# it wrote, or wrote no style at all and read none. Both are self-consistent
+# and neither reproduces a producer that *names* its style -- which is what
+# Magickit does, passing through the prompt style it asked Cognilens for.
+# Under the old read default (`"default"`, the write-side fallback) such a
+# digest was stored, `PUT` returned 200, and every unpinned reader saw
+# `present: false` forever.
+
+
+async def test_an_unpinned_read_finds_a_producer_named_style(
+    client: AsyncClient,
+) -> None:
+    """The regression. A digest nobody can read is not stored, in effect."""
+    first = await _open(client, PROJECT, "T-style-1")
+    await _put_digest(
+        client, PROJECT, "T-style-1", source_last_msg_id=first, style="concise"
+    )
+
+    code, body = await _get_digest(client, PROJECT, "T-style-1")
+
+    assert code == 200, body
+    assert body["present"] is True
+    assert body["digest"]["digest"] == BASE_BODY["digest"]
+    # And it says which one it handed back, rather than echoing a guess.
+    assert body["style"] == "concise"
+
+
+async def test_an_unpinned_read_takes_the_newest_of_several_styles(
+    client: AsyncClient,
+) -> None:
+    """Deterministic, so the panel does not flip between styles per request.
+
+    `generated_at` is set by the server on write, so the second PUT is the
+    newer one; `id` breaks the tie if the clock does not move between them.
+    """
+    first = await _open(client, PROJECT, "T-style-2")
+    await _put_digest(
+        client,
+        PROJECT,
+        "T-style-2",
+        source_last_msg_id=first,
+        style="concise",
+        digest="古い方の要約です。",
+    )
+    await _put_digest(
+        client,
+        PROJECT,
+        "T-style-2",
+        source_last_msg_id=first,
+        style="bullet",
+        digest="新しい方の要約です。",
+    )
+
+    code, body = await _get_digest(client, PROJECT, "T-style-2")
+
+    assert code == 200, body
+    assert body["style"] == "bullet"
+    assert body["digest"]["digest"] == "新しい方の要約です。"
+
+
+async def test_pinning_a_style_still_selects_exactly_that_one(
+    client: AsyncClient,
+) -> None:
+    """Unpinned is the new default, not the only behaviour: the multi-style
+    key in migration 0008 is only useful if a reader can choose."""
+    first = await _open(client, PROJECT, "T-style-3")
+    await _put_digest(
+        client,
+        PROJECT,
+        "T-style-3",
+        source_last_msg_id=first,
+        style="concise",
+        digest="concise の方。",
+    )
+    await _put_digest(
+        client,
+        PROJECT,
+        "T-style-3",
+        source_last_msg_id=first,
+        style="bullet",
+        digest="bullet の方。",
+    )
+
+    code, body = await _get_digest(client, PROJECT, "T-style-3", style="concise")
+
+    assert code == 200, body
+    assert body["style"] == "concise"
+    assert body["digest"]["digest"] == "concise の方。"
+
+
+async def test_a_pinned_style_that_was_never_written_is_absent_not_the_other_one(
+    client: AsyncClient,
+) -> None:
+    """Pinning must not fall back to "some digest": a caller that asked for
+    one prompt's output would silently be shown another's."""
+    first = await _open(client, PROJECT, "T-style-4")
+    await _put_digest(
+        client, PROJECT, "T-style-4", source_last_msg_id=first, style="concise"
+    )
+
+    code, body = await _get_digest(client, PROJECT, "T-style-4", style="detailed")
+
+    assert code == 200, body
+    assert body["present"] is False
+    assert body["digest"] is None
+    # Echoed back, so the caller can see which question got this answer.
+    assert body["style"] == "detailed"
+
+
+async def test_an_unpinned_read_of_a_thread_with_no_digest_names_no_style(
+    client: AsyncClient,
+) -> None:
+    """Nothing was asked for and nothing was found, so there is no style to
+    report. Naming the write-side default here would assert that a digest
+    exists under a label that may never have been written."""
+    await _open(client, PROJECT, "T-style-5")
+
+    code, body = await _get_digest(client, PROJECT, "T-style-5")
+
+    assert code == 200, body
+    assert body["present"] is False
+    assert body["style"] is None
+
+
+async def test_the_embedded_digest_also_finds_a_producer_named_style(
+    client: AsyncClient,
+) -> None:
+    """`include_digest` shares one function with the standalone endpoint, so
+    it shared the defect too -- and it is the path `/ui` renders."""
+    first = await _open(client, PROJECT, "T-style-6")
+    await _put_digest(
+        client, PROJECT, "T-style-6", source_last_msg_id=first, style="concise"
+    )
+
+    r = await client.get(
+        f"/v1/projects/{PROJECT}/threads/T-style-6",
+        params={"include_digest": "true"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["digest"]["present"] is True
+    assert r.json()["digest"]["style"] == "concise"
+
+
+async def test_the_embedded_digest_can_be_pinned_too(client: AsyncClient) -> None:
+    first = await _open(client, PROJECT, "T-style-7")
+    await _put_digest(
+        client, PROJECT, "T-style-7", source_last_msg_id=first, style="concise"
+    )
+
+    r = await client.get(
+        f"/v1/projects/{PROJECT}/threads/T-style-7",
+        params={"include_digest": "true", "digest_style": "detailed"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["digest"]["present"] is False

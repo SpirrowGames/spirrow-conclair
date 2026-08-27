@@ -311,6 +311,10 @@ async def get_thread(
     # different name. Defaults off so no existing caller pays for a field
     # it does not read.
     include_digest: Annotated[bool, Query()] = False,
+    # Which stored digest to embed. Unpinned by default, which is what makes
+    # "give me the summary" work without the caller knowing what styles a
+    # producer happens to write; see `services.digest.fetch_digest_response`.
+    digest_style: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
 ) -> ThreadView:
     thread = await session.scalar(
         select(Thread).where(
@@ -353,7 +357,11 @@ async def get_thread(
     # that are individually plausible and jointly false).
     digest = (
         await fetch_digest_response(
-            session, project=project, thread_id=thread_id, rollup=rollup
+            session,
+            project=project,
+            thread_id=thread_id,
+            style=digest_style,
+            rollup=rollup,
         )
         if include_digest
         else None

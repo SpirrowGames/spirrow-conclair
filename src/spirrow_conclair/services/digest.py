@@ -25,7 +25,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from spirrow_conclair.models import Message, ThreadDigest
-from spirrow_conclair.models.digest import DEFAULT_DIGEST_STYLE
 from spirrow_conclair.schemas.digest import (
     ThreadDigest as ThreadDigestSchema,
 )
@@ -64,7 +63,7 @@ async def fetch_digest_response(
     thread_id: str,
     scope: str = "thread",
     target_msg_id: str | None = None,
-    style: str = DEFAULT_DIGEST_STYLE,
+    style: str | None = None,
     rollup: ThreadRollup | None = None,
 ) -> ThreadDigestResponse:
     """A thread's digest and how far behind it is.
@@ -79,7 +78,17 @@ async def fetch_digest_response(
         thread_id: Thread whose digest to read.
         scope: ``thread`` for the whole-thread digest, ``message`` for one msg.
         target_msg_id: The msg, when ``scope`` is ``message``.
-        style: Which digest to read; producers may store several.
+        style: Which digest to read, or ``None`` for "whichever exists,
+            newest first". **None is the right default, not a shortcut.**
+            ``style`` is an opaque label here (see
+            ``models.digest.DEFAULT_DIGEST_STYLE``): Conclair does not know
+            what any style means, so it cannot know which one a reader
+            wants. Defaulting to the *write* default instead assumed every
+            producer had omitted the field, and a producer that names its
+            style -- as Magickit does, passing the prompt style it asked
+            Cognilens for -- became invisible to every unpinned reader
+            while `PUT` kept returning 200. Pin a style to select among
+            several; leave it None to mean "the summary".
         rollup: Pass the caller's own rollup when it already has one, so
             ``thread_last_msg_id`` here is the *same* value that caller
             reports. ``get_thread`` does this, which is why embedding the
@@ -97,12 +106,22 @@ async def fetch_digest_response(
         ThreadDigest.project == project,
         ThreadDigest.thread_id == thread_id,
         ThreadDigest.scope == scope,
-        ThreadDigest.style == style,
     ]
+    if style is not None:
+        conditions.append(ThreadDigest.style == style)
     if scope == "message":
         conditions.append(ThreadDigest.target_msg_id == target_msg_id)
 
-    row = await session.scalar(select(ThreadDigest).where(*conditions))
+    # Newest first, so an unpinned read is deterministic when a thread
+    # holds several styles. `id` breaks a tie on `generated_at`: the
+    # producer supplies that timestamp, so two digests can carry the same
+    # one, and an unordered pick would flip between them per request.
+    row = await session.scalar(
+        select(ThreadDigest)
+        .where(*conditions)
+        .order_by(ThreadDigest.generated_at.desc(), ThreadDigest.id.desc())
+        .limit(1)
+    )
 
     if row is None:
         return ThreadDigestResponse(
@@ -127,7 +146,9 @@ async def fetch_digest_response(
         project=project,
         thread_id=thread_id,
         scope=scope,
-        style=style,
+        # The style that was found, not the one asked for: an unpinned read
+        # passes None, and "which digest is this" is the useful answer.
+        style=row.style,
         thread_last_msg_id=resolved_rollup.last_msg_id,
         thread_msg_count=resolved_rollup.msg_count,
         present=True,

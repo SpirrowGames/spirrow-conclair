@@ -40,7 +40,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from spirrow_conclair.db import SessionDep
 from spirrow_conclair.models import ThreadDigest
-from spirrow_conclair.models.digest import DEFAULT_DIGEST_STYLE
 from spirrow_conclair.schemas.digest import (
     DigestScope,
     PutThreadDigestRequest,
@@ -191,7 +190,9 @@ async def get_digest(
     session: SessionDep,
     scope: Annotated[DigestScope, Query()] = "thread",
     target_msg_id: Annotated[str | None, Query(max_length=200)] = None,
-    style: Annotated[str, Query(min_length=1, max_length=64)] = DEFAULT_DIGEST_STYLE,
+    # Unpinned by default: see `services.digest.fetch_digest_response`.
+    # Pin a style only to choose among several stored for one thread.
+    style: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
 ) -> ThreadDigestResponse:
     await integrity_svc.fetch_thread_or_raise(
         session, project=project, thread_id=thread_id

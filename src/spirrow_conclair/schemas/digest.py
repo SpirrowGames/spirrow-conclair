@@ -131,7 +131,12 @@ class ThreadDigestResponse(BaseModel):
     project: str
     thread_id: str
     scope: DigestScope
-    style: str
+    #: Which digest this response is about: the style actually found when
+    #: one was, otherwise the style the caller pinned. ``None`` means the
+    #: caller pinned nothing and nothing was stored -- there is no style to
+    #: name, and naming the write-side default here would assert a digest
+    #: exists under a label that may never have been written.
+    style: str | None
     thread_last_msg_id: str | None
     thread_msg_count: int
     present: bool
