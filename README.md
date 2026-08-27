@@ -80,7 +80,7 @@ src/spirrow_conclair/
 ├── main.py              # FastAPI app + /health + /static + /ui mount
 ├── config.py            # Pydantic Settings
 ├── db.py                # async engine / session / health_check
-├── models/              # (T04) SQLAlchemy ORM
+├── models/              # (T04) SQLAlchemy ORM (thread / message / event / digest / ...)
 ├── schemas/             # (T04) pydantic request/response
 ├── api/                 # (T06+) FastAPI routers (/v1 JSON API)
 ├── services/            # (T05) status_transition / integrity / msg_id_allocator
@@ -121,7 +121,7 @@ ssh -L 18115:127.0.0.1:8115 sgadmin@<host>
 |---|---|---|
 | Landing | `/ui/` | 直近の project (localStorage) + project 名入力 |
 | Thread 一覧 | `/ui/projects/{p}/threads` | status / owner filter, pagination, 7 秒 polling |
-| Thread 詳細 | `/ui/projects/{p}/threads/{tid}` | message 一覧 + 投稿 form + close form (owner only) |
+| Thread 詳細 | `/ui/projects/{p}/threads/{tid}` | message 一覧 (または要約) + 投稿 form + close form (owner only) |
 | Events | `/ui/projects/{p}/events` | audit log (action / thread_id / since/until filter) |
 | Integrity | `/ui/projects/{p}/integrity` | 整合性 audit report (常に 200) |
 
@@ -131,6 +131,7 @@ ssh -L 18115:127.0.0.1:8115 sgadmin@<host>
 - **HTMX polling**: list / messages / integrity は 7 秒ごとに再 fetch、フィルタ入力中の値は別 element なので吹き飛ばない。
 - **post 直後に即時反映**: `HX-Trigger: messagePosted` で thread detail の messages partial を即時再 fetch。
 - **close**: owner のみ `<form>` から実行、確認ダイアログあり、成功時 `HX-Refresh: true` で full reload。非 owner は inline error。
+- **全文 / 要約の切り替え**: thread detail 上部の `表示: 全文表示 / 要約表示`。`?digest=1` というクエリパラメータなので**リンクとして共有できる**。要約は LLM 生成だが**作るのは Conclair ではない** (Magickit → Cognilens → Lexora `light`)。Conclair は預かった要約を出し、それが何処まで対象か (`msg-042 まで` / `以降 3 件は未反映`) と何時作られたかを正直に添える。未生成なら「まだ生成されていません」と言う。
 
 依存: jinja2, aiofiles, python-multipart (fastapi[standard] 経由で大半は自動)。HTMX 1.9.10 は `static/js/htmx.min.js` に vendoring 済 (script tag で取込、bundler 不要)。**CDN から読まないこと** — 閉域網の egress allowlist が公開 CDN を塞ぐと、ページは 200 で返るのに HTMX が無いので全 partial が永久に来ない。`tests/unit/test_templates_no_external_assets.py` が外部オリジン参照を拒否する。
 
@@ -191,7 +192,18 @@ curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/close 
 curl 'http://127.0.0.1:8115/v1/projects/myproj/threads?status=active&limit=50'
 
 # thread の summary view (resolved なら decide msg のみ)
+#   ※ これは LLM 要約ではない。message フィルタである (下の digest とは別物)
 curl 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius?mode=summary'
+
+# LLM 要約 (digest) を同梱して取得
+curl 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius?include_digest=true'
+
+# 要約だけ (未生成でも 200 + present:false)
+curl 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/digest'
+
+# 要約を預ける (producer = Magickit。Conclair は作らない)
+curl -X PUT 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/digest'   -H 'Content-Type: application/json'   -d '{"digest":"...","source_last_msg_id":"msg-042","source_msg_count":18,
+       "producer":"magickit-digest-sweeper","style":"concise","tier":"light"}'
 
 # audit log
 curl 'http://127.0.0.1:8115/v1/projects/myproj/events?action=status_transition'

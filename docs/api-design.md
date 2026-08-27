@@ -86,6 +86,20 @@ write 系 API は対応する action を chatroom_events に append する:
 - close_thread は logically `post_message` + `status_transition` の 2 event を出す (action='close_thread' は使わない、status_transition で `to: 'resolved'` で識別可能)
 - 将来 admin 操作 (rename / merge / supersede) を追加する時は新 action を増やす
 
+**この語彙に何かを足す前に読むこと。** `PUT .../digest` (§3.8) は意図的に
+chatroom_events に**1 行も書かない**。理由は 2 つあり、どちらか一方でも十分:
+
+1. Magickit の稼働状況ページは `GET /v1/projects/{p}/events?limit=1` を
+   「直近の動き / 稼働中の根拠」として読む (`web/ops.py`)。digest の書き込みが
+   そこに現れると、**ループが死んでいる project を「動いている」と表示する** —
+   検出のために存在する画面が、検出対象を隠す。
+2. `EventAction` は閉じた `Literal` で、`api/events.py` が**行ごとに**
+   `model_validate` する。DB 列に CHECK は無い ∴ 未登録の action は INSERT は
+   通り、その後 **`GET /events` 全体を 500 にする** (上記 ops の読みも一緒に死ぬ)。
+
+digest の記録は `thread_digests.generated_at` / `producer` 側にある。digest の
+書き込みは chatroom 活動ではなく、**chatroom 活動のキャッシュ**である。
+
 actor は msg.author を継承 (status_transition の actor も同上)。
 
 ---
@@ -229,6 +243,63 @@ msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` �
 - `stale_activity_key` — `threads.last_msg_num` (非正規化された並び替えキー) が、その thread の
   実際の最新 msg と食い違う。schema 内で唯一の非正規化値 ∴ 唯一「元と食い違いうる」値なので、
   信用せず監査する。誤りの向きは危険側 (低すぎると活きた thread が一覧から沈む)
+
+### 2.5 ThreadDigest
+
+LLM が生成した要約。**Conclair は作らない** — producer (Magickit → Cognilens →
+Lexora light) が `PUT` したものを保管し、被覆範囲を添えて返すだけ。
+`producer` / `model` / `tier` は**記録であって検証結果ではない** (loop control の
+`actor` と同じ立場。tailnet が信頼境界であり、検証するには外を呼ぶことになるが、
+Conclair が leaf である以上それはできない)。
+
+```json
+{
+  "project": "spirrow-mindwire",
+  "thread_id": "T-D4-foo",
+  "scope": "thread",
+  "style": "concise",
+  "thread_last_msg_id": "msg-045",
+  "thread_msg_count": 21,
+  "present": true,
+  "digest": {
+    "scope": "thread",
+    "target_msg_id": null,
+    "style": "concise",
+    "digest": "Bohr が X 方式を提案、Heisenberg が実装。Einstein が Y を指摘。",
+    "source_last_msg_id": "msg-042",
+    "source_msg_count": 18,
+    "truncated": false,
+    "model": "Qwen3-32B",
+    "tier": "light",
+    "producer": "magickit-digest-sweeper",
+    "generated_at": "2026-08-27T04:12:00Z",
+    "source_chars": 21000,
+    "input_tokens": 6000,
+    "output_tokens": 380,
+    "duration_ms": 18400,
+    "behind_by": 3,
+    "stale": true
+  }
+}
+```
+
+- **`present`** — 保管の有無。`false` は**正常な回答**であって失敗ではない
+  (`ControlStateResponse.configured` と同じ意図的冗長)。呼び出し側は
+  `error_type` ではなく `present` で分岐する: 「未生成」を outage と読むと
+  永久に何も生成されない
+- **`source_last_msg_id`** — freshness key。`messages` は append-only で行は
+  不変 ∴「msg-N まで対象」は永久に真。cache timestamp と違い、既に嘘になって
+  いることがない
+- **`behind_by` / `stale`** — サーバ側で導出。`messages` を **`thread_id` で
+  絞った COUNT**。`msg_id` は project 全体の連番なので、連番の引き算は兄弟
+  スレッドの msg を数える (§2.1 `last_activity_at` と同根の罠)
+- **`source_msg_count`** — producer が**実際に読んだ件数**という provenance。
+  **freshness の判定には使わない**: 長いスレッドを窓で切った producer は
+  thread の件数より小さい値を報告する ∴ 引き算すると「窓で切ったこと」が
+  「古いこと」として報告される
+- **`truncated`** — producer が中略した ∴ この要約は対象範囲の一部しか読んでいない
+- **`style`** — 一意キーの一部。1 thread が複数 style の digest を持てるので、
+  新しいプロンプトの試行が UI が描いている digest を潰さない
 
 ---
 
@@ -454,13 +525,15 @@ CI 実測 (`tests/integration/test_thread_listing_scale.py`、`GET /threads?limi
 
 **Query params:**
 - `mode`: `full` (default) または `summary`
+- `include_digest`: `false` (default) / `true` — LLM 要約 (§2.5) を同梱する
 
 **Response 200:**
 ```json
 {
   "thread": { /* Thread */ },
   "messages": [ /* Message[] */ ],
-  "mode": "full"
+  "mode": "full",
+  "digest": null
 }
 ```
 
@@ -469,6 +542,25 @@ CI 実測 (`tests/integration/test_thread_listing_scale.py`、`GET /threads?limi
 - それ以外の status では `mode=full` と同じ全 msg
 
 ソート順: `messages` は `msg_id` 昇順 (post 時刻順)。
+
+> **`mode=summary` は LLM 要約ではない。** これは resolved thread の decide msg
+> だけを返す **message フィルタ**で、mindwire の read tool がその意味に依存して
+> いる。LLM 要約は `digest` という**別名の別オブジェクト** (§2.5) で、`mode` の
+> 第 3 の値ではない。両者は直交し、同時に指定しても互いの挙動を変えない。
+
+`digest` は 3 状態で、区別は意図的:
+
+| 値 | 意味 |
+|---|---|
+| `null` | `include_digest` を渡していない |
+| `{present: false, digest: null, ...}` | 聞いたが、まだ保管されていない |
+| `{present: true, digest: {...}}` | 保管されている (被覆範囲付き) |
+
+同梱する理由: `behind_by` は**この同じ応答が運ぶ messages に対する言明**である。
+2 回に分けて呼ぶと 2 つの瞬間についての 2 つの言明になり、間に msg が着いた
+ときに「個別には妥当だが同時には偽」なペアになる (§2.1 `last_activity_at` の
+注記と同根)。追加集計はゼロ — `get_thread` が既に計算した rollup をそのまま
+渡すので、費用は index 1 行と bounded な COUNT 1 回だけ。
 
 **Errors:**
 - 404 NotFoundError
@@ -509,6 +601,66 @@ CI 実測 (`tests/integration/test_thread_listing_scale.py`、`GET /threads?limi
   "checked_at": "2026-05-01T19:51:59Z"
 }
 ```
+
+---
+
+### 3.8 PUT /v1/projects/{project}/threads/{thread_id}/digest — put_digest
+
+producer が完成した要約を預ける。**Conclair は要約を作らない。**
+
+**Body:**
+```json
+{
+  "digest": "Bohr が X 方式を提案、Heisenberg が実装。Einstein が Y を指摘。",
+  "source_last_msg_id": "msg-042",
+  "source_msg_count": 18,
+  "producer": "magickit-digest-sweeper",
+  "scope": "thread",
+  "target_msg_id": null,
+  "style": "concise",
+  "truncated": false,
+  "model": "Qwen3-32B",
+  "tier": "light",
+  "source_chars": 21000,
+  "input_tokens": 6000,
+  "output_tokens": 380,
+  "duration_ms": 18400
+}
+```
+
+必須は `digest` / `source_last_msg_id` / `source_msg_count` / `producer` の 4 つ。
+
+**Response 200** — 作成・更新のどちらも 200 (upsert に正直な 200/201 の分割は
+無い。`PUT /control` と同じ)。返る `behind_by` は**この書き込み時点**の値。
+
+**検証:**
+- thread が存在しない → 404
+- `source_last_msg_id` がこの **thread 内**に存在しない → 409。`msg_id` は
+  project 全体の連番なので、`thread_id` で絞らないと**兄弟スレッドの msg**が
+  通り、その digest の被覆範囲は永久に測れなくなる。同じ assert が過剰
+  パディング (`msg-0042` vs `msg-042`) も弾く — `format_msg_id` の正準形は
+  整数ごとに 1 つなので、これを通すと文字列比較で永久に stale に見える
+- `scope='message'` かつ `target_msg_id` が thread 内に無い → 409
+- `scope` と `target_msg_id` が不整合 (thread なのに target あり / message なのに
+  target なし) → 422 (pydantic validator。CHECK 制約は backstop)
+
+**`chatroom_events` に行を作らない。** §1.7 参照。
+
+### 3.9 GET /v1/projects/{project}/threads/{thread_id}/digest — get_digest
+
+**Query params:** `scope` (default `thread`) / `target_msg_id` / `style` (default `default`)
+
+**Response:** §2.5 の `ThreadDigest`。
+
+**`/control` と 404 の扱いが逆なのは意図的。** `/control` が 404 を返さないのは、
+「未設定」を「読めなかった」と誤読した呼び出し側が**全 project を止める**から。
+ここは逆向きで、「読めなかった」を「digest 無し」と誤読しても light tier の
+LLM 呼び出しが 1 回増えるだけ ∴ 素直に分ける:
+
+| ケース | status |
+|---|---|
+| thread が存在しない | **404** (`get_thread` と一致させる) |
+| thread はあるが digest 無し | **200** + `present: false` + `digest: null` |
 
 ---
 
@@ -622,6 +774,13 @@ async def integrity_handler(request, exc):
 - 添付ファイル
 - WebSocket / SSE による real-time push (現状 polling のみ)
 - 全文検索 (msg.content への GIN インデックス)
+- **LLM による要約の生成** (§2.5 / §3.8)。保管と表示は Conclair の仕事だが、
+  生成は違う。これはフェーズの問題ではなく**構造的な線引き**で、Conclair は
+  他の Spirrow サービスを呼ばない leaf である (`chatroom_proxy.py` の
+  「No circular dependency」)。要約を作るには Cognilens / Lexora を呼ぶことに
+  なり、それは orchestration 層 = Magickit の責務。同じ理由で「生成中」表示も
+  ここには持たない — 正直な「生成中」には lease が要り、producer が死んだ
+  ときに期限切れにする手段が Conclair には無い
 
 これらは設計 v2 §17 に列挙済。必要時に追加 endpoint を増やす方針。
 
@@ -637,6 +796,10 @@ async def integrity_handler(request, exc):
 - [ ] close_thread は decide msg + thread.status='resolved' + status_transition event
 - [ ] mode='summary' で resolved thread は decide msg のみ返却
 - [ ] check_integrity は違反でも 200 (report endpoint)
+- [ ] digest PUT が `chatroom_events` に 1 行も作らない (件数も `?limit=1` の中身も不変)
+- [ ] digest GET は thread が在る限り 200 (未生成は `present: false`)
+- [ ] `behind_by` は同 thread の msg だけを数える (兄弟スレッドの post で増えない)
+- [ ] `include_digest` を渡さない `get_thread` の応答は従来と同一 (`digest: null` のみ増える)
 
 ---
 

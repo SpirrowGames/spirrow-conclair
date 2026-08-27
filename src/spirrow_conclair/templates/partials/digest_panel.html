@@ -1,0 +1,71 @@
+{#
+  要約 (digest) 表示。**`#messages` の内側**に置かれる (message_list.html 経由)。
+
+  外に出さない理由: staleness 行「以降 N 件は未反映」は messages と同じ周期で
+  再計算されなければ意味がない。poll の外にあると、新しい msg が届いても
+  「反映済み」と言い続ける — この UI の唯一の仕事を、静かに間違える。
+  内側なら、このページの他の全部を更新している機構がそのまま面倒を見る。
+
+  Conclair は要約を作らない。作るのは別サービス (Magickit → Cognilens →
+  Lexora light) で、ここは預かったものを出すだけ。∴ 「生成中」表示は無く、
+  未生成は「まだ無い」とだけ言う (正直な「生成中」には lease が必要で、
+  producer が死ぬと永久に「生成中」になる。Conclair は timer も job 状態も
+  持たず、leaf 制約により producer に問い合わせられない)。
+#}
+{% if view.digest is none %}
+    {#
+      到達しないはず: digest 表示のときは routes が include_digest=True で
+      呼ぶ。ここに落ちたら「要約が空」ではなく配線が切れている ∴ そう書く。
+    #}
+    <p class="muted empty-state">要約を取得できませんでした (include_digest が渡っていません)。</p>
+{% elif not view.digest.present %}
+    <p class="muted empty-state">要約はまだ生成されていません。</p>
+    <p class="muted">
+        生成は別サービス (Magickit) の仕事で、Conclair は預かった要約を出すだけです。
+        このページを開いたままにしておけば、生成され次第 7 秒以内に出ます。
+    </p>
+{% else %}
+    {% set d = view.digest.digest %}
+    <article class="digest-panel">
+        <div class="digest-content">{{ d.digest }}</div>
+
+        <p class="digest-scope muted">
+            この要約は <code>{{ d.source_last_msg_id }}</code> までを対象
+            {%- if d.stale %}
+            （<strong>以降 {{ d.behind_by }} 件は未反映</strong>）
+            {%- elif view.digest.thread_last_msg_id %}
+            （最新 <code>{{ view.digest.thread_last_msg_id }}</code> まで反映済み）
+            {%- endif %}
+        </p>
+
+        <p class="digest-provenance muted">
+            {{ d.producer }}
+            &nbsp;|&nbsp; {{ d.model or "model 不明" }}{% if d.tier %} ({{ d.tier }}){% endif %}
+            &nbsp;|&nbsp; style: {{ d.style }}
+            {#
+              ago と iso の両方を出す。ago は人が読む数字、iso は chatroom に
+              貼るときに引用する数字。control widget と同じ理由。
+            #}
+            &nbsp;|&nbsp; {{ d.generated_at | ago }}（{{ d.generated_at | iso }}）
+        </p>
+
+        {% if d.truncated %}
+        <p class="digest-note">
+            長いスレッドのため<strong>中略あり</strong>の要約です
+            （生成時に読めたのは {{ d.source_msg_count }} 件）。
+        </p>
+        {% endif %}
+
+        {#
+          再生成の可否はここでは言わない。ボタン (またはその不在の理由) は
+          `#messages` の外・トグルの隣にあり、経路ごとに正しいことを書いて
+          いる ∴ ここで重ねて言うと、ボタンが出ている経路で「指示できません」
+          と矛盾する。この段落は事実だけを述べる。
+        #}
+        {% if d.stale %}
+        <p class="digest-note digest-note-stale">
+            表示中の要約は古い可能性があります。未反映分は「全文表示」で読めます。
+        </p>
+        {% endif %}
+    </article>
+{% endif %}

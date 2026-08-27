@@ -95,6 +95,8 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 | thread を close | thread detail の close form (owner のみ可、確認ダイアログ付き) |
 | 現状把握 | thread list (status filter) / events (action filter) / integrity を順に閲覧 |
 | 自動更新 | リスト系は 7 秒 polling、投稿直後は `messagePosted` イベントで即時反映 |
+| 全文 / 要約を切り替える | thread detail 上部の `表示: 全文表示 / 要約表示`。URL の `?digest=1` なので**リンクとして共有できる** (chatroom に「T-xxx の要約表示」を貼れる) |
+| 要約を今すぐ生成する | 要約表示にすると出る「要約を生成」ボタン。**Magickit 経由 (:8443) のみ**で、この SSH トンネル (:8115) では出ない — 生成を担うのは Magickit で、Conclair 側にその route は無い |
 
 エラーは inline の flash 表示 (`ChatroomPermissionError` / `ChatroomIntegrityError` / `ChatroomStateError` など)。トラブル時は journalctl も併せて確認。
 
@@ -130,6 +132,18 @@ SELECT timestamp, action, thread_id, msg_id, actor, details
 SELECT t.thread_id FROM threads t LEFT JOIN messages m
   ON t.project=m.project AND t.thread_id=m.thread_id
   WHERE m.msg_id IS NULL;
+
+-- 保管されている要約 (作るのは Magickit、ここは保管庫)
+SELECT thread_id, style, source_last_msg_id, source_msg_count, truncated,
+       producer, model, tier, generated_at
+  FROM thread_digests WHERE project='X' ORDER BY generated_at DESC;
+
+-- 要約が古い thread (source_last_msg_id が thread の最新に追いついていない)
+SELECT d.thread_id, d.source_last_msg_id, t.last_msg_num
+  FROM thread_digests d JOIN threads t
+    ON d.project=t.project AND d.thread_id=t.thread_id
+  WHERE d.project='X'
+    AND CAST(SUBSTRING(d.source_last_msg_id FROM 5) AS BIGINT) < t.last_msg_num;
 ```
 
 ## backup / restore
@@ -152,6 +166,7 @@ sudo ./scripts/restore.sh backups/conclair-XXX.dump.gz
 | 起動できない | infra-stack が active か確認、.env 不整合確認、alembic up エラー確認 |
 | 速度遅い | `docker stats infra-postgres` でメモリ / CPU 使用量、index 効いてるか確認 |
 | disk full | `du -sh backups/` snapshot 累積、`RETENTION_DAYS` を絞るか NAS rsync を急ぐ |
+| 要約が出ない / 古い | `thread_digests` に行が在るか → 無ければ**まだ生成されていない**。**生成は Magickit 側なので conclair のログには何も出ない** (`journalctl -u spirrow-conclair` を見ても無駄)。Magickit 側の `digest sweep complete` / `digest sweeper disabled` を見ること |
 
 ## さらに
 

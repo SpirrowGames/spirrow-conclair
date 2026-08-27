@@ -76,6 +76,54 @@ def _render(
     )
 
 
+#: Header Magickit's ``/ui`` proxy sets on every forwarded request.
+#:
+#: The 要約生成 button posts to a route **Magickit** claims (it is the
+#: producer; Cognilens and the GPU are on that side), so through a direct
+#: :8115 tunnel that POST would 404. Conclair therefore renders the button
+#: only when it can see the request came through Magickit. A config flag
+#: here could not do it: the same process serves both paths at once.
+#:
+#: Spoofable, and that is fine -- it decides what to *render*, not what is
+#: allowed, the same stance as ``actor`` in loop control.
+VIA_HEADER = "X-Spirrow-Via"
+VIA_MAGICKIT = "magickit"
+
+
+def _via_magickit(request: Request) -> bool:
+    return request.headers.get(VIA_HEADER, "").lower() == VIA_MAGICKIT
+
+
+def _messages_ctx(
+    project: str,
+    thread_id: str,
+    view: Any,
+    *,
+    mode: str,
+    digest: bool,
+) -> dict[str, Any]:
+    """The context ``partials/message_list.html`` needs, built once.
+
+    Both render paths go through here — the page's ``{% include %}`` and the
+    7-second fragment poll. They used to build their own dicts, and the
+    fragment's omitted ``mode`` and ``thread_id``; that was harmless only
+    while the partial referenced neither. A partial that branches on a key
+    one path does not supply renders correctly on load and then differently
+    every 7 seconds, which is a hard bug to see and an easy one to
+    reintroduce.
+    """
+    return {
+        "project": project,
+        "thread_id": thread_id,
+        "view": view,
+        "mode": mode,
+        "digest": digest,
+        # Named separately from `digest` (the requested view) so the partial
+        # reads as "which view am I rendering" rather than re-deriving it.
+        "digest_view": digest,
+    }
+
+
 def _flash_response(
     request: Request,
     err: ChatroomError,
@@ -319,13 +367,25 @@ async def thread_detail_page(
     thread_id: ThreadIdPath,
     session: SessionDep,
     mode: Annotated[Literal["full", "summary"], Query()] = "full",
+    digest: Annotated[bool, Query()] = False,
 ) -> HTMLResponse:
     ctx = _base_ctx(project, "threads")
-    ctx.update({"thread_id": thread_id, "mode": mode})
+    ctx.update(
+        {
+            "thread_id": thread_id,
+            "mode": mode,
+            "digest": digest,
+            "can_generate_digest": _via_magickit(request),
+        }
+    )
 
     try:
         view = await api_get_thread(
-            project=project, thread_id=thread_id, session=session, mode=mode
+            project=project,
+            thread_id=thread_id,
+            session=session,
+            mode=mode,
+            include_digest=digest,
         )
     except ChatroomNotFoundError as e:
         ctx.update(
@@ -338,7 +398,7 @@ async def thread_detail_page(
         )
         return _render(request, "thread_detail.html", ctx, status_code=404)
 
-    ctx["view"] = view
+    ctx.update(_messages_ctx(project, thread_id, view, mode=mode, digest=digest))
     return _render(request, "thread_detail.html", ctx)
 
 
@@ -353,10 +413,15 @@ async def thread_messages_fragment(
     thread_id: ThreadIdPath,
     session: SessionDep,
     mode: Annotated[Literal["full", "summary"], Query()] = "full",
+    digest: Annotated[bool, Query()] = False,
 ) -> HTMLResponse:
     try:
         view = await api_get_thread(
-            project=project, thread_id=thread_id, session=session, mode=mode
+            project=project,
+            thread_id=thread_id,
+            session=session,
+            mode=mode,
+            include_digest=digest,
         )
     except ChatroomNotFoundError as e:
         return _flash_response(request, e, status_code=404)
@@ -364,7 +429,7 @@ async def thread_messages_fragment(
     return _render(
         request,
         "partials/message_list.html",
-        {"project": project, "view": view},
+        _messages_ctx(project, thread_id, view, mode=mode, digest=digest),
     )
 
 

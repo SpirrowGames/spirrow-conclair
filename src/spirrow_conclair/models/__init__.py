@@ -9,6 +9,7 @@ class Base(DeclarativeBase):
 
 # Re-export concrete models so `Base.metadata` includes them when this
 # package is imported (alembic env.py imports this for autogenerate).
+from spirrow_conclair.models.digest import ThreadDigest  # noqa: E402, F401
 from spirrow_conclair.models.event import ChatroomEvent  # noqa: E402, F401
 from spirrow_conclair.models.message import Message  # noqa: E402, F401
 from spirrow_conclair.models.project_control import (  # noqa: E402, F401
@@ -24,6 +25,7 @@ __all__ = [
     "Message",
     "ChatroomEvent",
     "ActorReadCursor",
+    "ThreadDigest",
     "ProjectControl",
     "ProjectControlHistory",
 ]

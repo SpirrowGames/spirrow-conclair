@@ -7,6 +7,12 @@ Naming convention (per docs/api-design.md §4):
 - `*ListResponse`: paginated list responses
 """
 
+from spirrow_conclair.schemas.digest import (
+    DigestScope,
+    PutThreadDigestRequest,
+    ThreadDigest,
+    ThreadDigestResponse,
+)
 from spirrow_conclair.schemas.event import (
     ChatroomEvent,
     EventListResponse,
@@ -61,6 +67,7 @@ __all__ = [
     "ControlHistoryListResponse",
     "ControlState",
     "ControlStateResponse",
+    "DigestScope",
     "EventListResponse",
     "IntegrityCheckResponse",
     "IntegrityIssue",
@@ -74,9 +81,12 @@ __all__ = [
     "PostMessageResponse",
     "ProjectSummary",
     "ProjectSummaryListResponse",
+    "PutThreadDigestRequest",
     "ReportObservedRequest",
     "SetControlRequest",
     "Thread",
+    "ThreadDigest",
+    "ThreadDigestResponse",
     "ThreadListResponse",
     "ThreadStatus",
     "ThreadView",

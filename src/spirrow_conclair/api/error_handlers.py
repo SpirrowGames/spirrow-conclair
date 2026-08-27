@@ -23,6 +23,31 @@ from spirrow_conclair.exceptions import (
 )
 
 
+def _jsonable(value: Any) -> Any:
+    """Coerce one validation-error value into something JSON can hold.
+
+    pydantic v2 puts the **original exception object** into ``ctx["error"]``
+    when a ``@model_validator`` raises, and ``JSONResponse`` cannot serialize
+    it: the 422 turns into a 500 while being rendered. That is the worst
+    shape this handler can take -- the endpoint whose job is to say what you
+    got wrong is the one that breaks, and only for the errors that needed a
+    validator rather than a ``Field`` constraint.
+
+    It went unnoticed until the digest schema's cross-field rule, because
+    every schema here used only ``Field(...)`` constraints, whose ``ctx``
+    holds plain scalars. Coercing here rather than avoiding ``ValueError`` in
+    the one schema fixes the class instead of the instance: the next
+    validator someone writes does not have to rediscover this.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return str(value)
+
+
 def _payload(exc: ChatroomError, status: int) -> JSONResponse:
     body: dict[str, Any] = {
         "error_type": type(exc).__name__,
@@ -68,7 +93,7 @@ def register_error_handlers(app: FastAPI) -> None:
             content={
                 "error_type": "ValidationError",
                 "error": "Request body failed validation",
-                "details": {"errors": exc.errors()},
+                "details": {"errors": _jsonable(exc.errors())},
             },
         )
 

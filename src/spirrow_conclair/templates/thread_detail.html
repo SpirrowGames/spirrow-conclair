@@ -16,12 +16,65 @@
         <a href="/ui/projects/{{ project }}/threads">← threads</a>
         &nbsp;|&nbsp;
         mode:
-        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=full"
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=full{% if digest %}&amp;digest=1{% endif %}"
            class="{% if mode == 'full' %}active{% endif %}">full</a>
         /
-        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=summary"
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode=summary{% if digest %}&amp;digest=1{% endif %}"
            class="{% if mode == 'summary' %}active{% endif %}">summary</a>
     </p>
+
+    {#
+      表示切替。plain <a> によるフルページ遷移で、HTMX swap にはしない。
+
+      - サーバ駆動のクエリパラメータにするのは、すぐ上の `mode` が既にその
+        流儀であり、状態がページ単位の二値 (per-message ではない) だから。
+        URL に入るので**リンクとして共有できる** — agent が chatroom に
+        「T-xxx の要約表示」を貼れる。
+      - `#messages` の innerHTML だけを差し替えないのは、`hx-get` が
+        `#messages` **自身**に付いているため。内側だけ入れ替えるとコンテナ
+        の古い URL が残り、次の 7 秒 poll で表示が戻ってしまう。
+      - このページが重くなったら、fragment 側でコンテナ要素ごと描いて
+        `hx-swap="outerHTML"` にするのが筋。`innerHTML` swap への「改善」は
+        上記の理由で壊れる。
+    #}
+    <p class="muted digest-toggle" role="group" aria-label="表示切替">
+        表示:
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode={{ mode }}"
+           class="{% if not digest %}active{% endif %}">全文表示</a>
+        /
+        <a href="/ui/projects/{{ project }}/threads/{{ thread_id }}?mode={{ mode }}&amp;digest=1"
+           class="{% if digest %}active{% endif %}">要約表示</a>
+    </p>
+
+    {#
+      「要約生成」ボタン。トグルと同じ理由で `#messages` の**外**に置く:
+      flash が 7 秒 poll の innerHTML swap で消えないように。
+
+      描くのは Magickit 経由 (`X-Spirrow-Via`) のときだけ。この POST を処理
+      するのは Magickit で、Conclair 直 (:8115) では 404 になる — 要約を作る
+      のは Cognilens → Lexora を呼ぶことであり、leaf である Conclair には
+      できない。描画されるボタンが 404 するのは最悪の壊れ方なので、効かない
+      経路では代わりに理由を出す。
+    #}
+    {% if digest %}
+    <div class="digest-actions">
+        {% if can_generate_digest %}
+        <form hx-post="/ui/projects/{{ project }}/threads/{{ thread_id }}/digest"
+              hx-target="#flash-digest"
+              hx-swap="innerHTML"
+              hx-indicator="#digest-spinner"
+              style="display:inline;">
+            <button type="submit" class="btn">要約を生成</button>
+            <span id="digest-spinner" class="htmx-indicator muted">生成中… (20 秒ほど)</span>
+        </form>
+        {% else %}
+        <span class="muted">
+            要約の生成は Magickit 経由 (:8443) からのみ実行できます。
+        </span>
+        {% endif %}
+    </div>
+    <div id="flash-digest"></div>
+    {% endif %}
 
     <h1>
         <code>{{ view.thread.thread_id }}</code>
@@ -45,12 +98,15 @@
 </section>
 
 <section class="card">
-    <h2>messages
-        <span class="muted" style="font-size: 0.85em;">({{ view.messages | length }})</span>
+    {# `view.thread.msg_count` (the rollup), not `view.messages | length`:
+       under mode=summary the list is filtered down to the decide msg, so
+       counting the rendered rows reports "1" for a 40-message thread. #}
+    <h2>{% if digest %}要約{% else %}messages{% endif %}
+        <span class="muted" style="font-size: 0.85em;">({{ view.thread.msg_count }})</span>
     </h2>
     <div id="messages"
-         hx-get="/ui/projects/{{ project }}/threads/{{ thread_id }}/_messages?mode={{ mode }}"
-         hx-trigger="load delay:50ms, every 7s, messagePosted from:body"
+         hx-get="/ui/projects/{{ project }}/threads/{{ thread_id }}/_messages?mode={{ mode }}{% if digest %}&amp;digest=1{% endif %}"
+         hx-trigger="load delay:50ms, every 7s, messagePosted from:body, digestGenerated from:body"
          hx-swap="innerHTML">
         {% include "partials/message_list.html" %}
     </div>
