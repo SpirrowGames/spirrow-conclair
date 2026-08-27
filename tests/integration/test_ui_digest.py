@@ -263,7 +263,9 @@ async def test_the_message_count_is_the_rollup_not_the_filtered_list(
         f"/v1/projects/{PROJECT}/threads/T-1/close",
         json={"author": "tester", "summary_content": "決定"},
     )
-    assert close.status_code == 200, close.text
+    # 201: close_thread creates a decide msg (api/threads.py sets
+    # HTTP_201_CREATED), even though it also mutates the thread.
+    assert close.status_code == 201, close.text
 
     body = await _page(client, "T-1", mode="summary")
 

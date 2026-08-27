@@ -475,7 +475,9 @@ async def test_mode_and_include_digest_are_orthogonal(client: AsyncClient) -> No
         f"/v1/projects/{PROJECT}/threads/T-1/close",
         json={"author": "alice", "summary_content": "決定"},
     )
-    assert close.status_code == 200, close.text
+    # 201: close_thread creates a decide msg (api/threads.py sets
+    # HTTP_201_CREATED), even though it also mutates the thread.
+    assert close.status_code == 201, close.text
     head = close.json()["decide_msg"]["msg_id"]
 
     await _put_digest(client, PROJECT, "T-1", source_last_msg_id=head)
