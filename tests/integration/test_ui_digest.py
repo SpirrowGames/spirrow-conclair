@@ -356,3 +356,41 @@ async def _page_via(
     )
     assert r.status_code == 200, r.text
     return r.text
+
+
+# ---- the style the producer actually writes -----------------------------
+
+
+async def test_the_panel_renders_a_digest_stored_under_a_producer_named_style(
+    client: AsyncClient,
+) -> None:
+    """The regression, at the layer a human looks at.
+
+    Every other test in this file stores its digest without a ``style``, so
+    it lands on the write-side default -- which is also what the read path
+    used to assume. That pair is self-consistent and never reproduces the
+    real producer: Magickit passes through the prompt style it asked
+    Cognilens for (``concise``), and Cognilens accepts only
+    ``concise|detailed|bullet``, so ``default`` is a value it can never
+    write. The panel therefore said 「まだ生成されていません」 for every
+    digest ever produced, while ``PUT`` kept returning 200.
+    """
+    first = await _open(client, "T-styled")
+    await _store_digest(client, "T-styled", first, style="concise")
+
+    html = await _page(client, "T-styled", digest=1)
+
+    assert DIGEST_TEXT in html
+    assert "まだ生成されていません" not in html
+
+
+async def test_the_polled_fragment_renders_it_too(client: AsyncClient) -> None:
+    """The page and the 7-second poll must agree; the fragment is what a
+    reader is actually looking at a few seconds later."""
+    first = await _open(client, "T-styled-frag")
+    await _store_digest(client, "T-styled-frag", first, style="concise")
+
+    fragment = await _fragment(client, "T-styled-frag", mode="full", digest=1)
+
+    assert DIGEST_TEXT in fragment
+    assert "まだ生成されていません" not in fragment
