@@ -495,7 +495,6 @@ async def audit_project(
     for m in msg_rows:
         if not m.closes_thread:
             continue
-        thread = threads_by_id.get(m.thread_id)
         if thread is None:
             # already reported as orphan
             continue
