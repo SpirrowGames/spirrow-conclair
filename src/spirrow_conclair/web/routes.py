@@ -35,6 +35,7 @@ from spirrow_conclair.api.threads import (
     list_threads as api_list_threads,
     open_thread as api_open_thread,
 )
+from spirrow_conclair.config import get_settings
 from spirrow_conclair.db import SessionDep
 from spirrow_conclair.exceptions import ChatroomError, ChatroomNotFoundError
 from spirrow_conclair.schemas import (
@@ -551,7 +552,9 @@ async def integrity_page(
     project: ProjectPath,
     session: SessionDep,
 ) -> HTMLResponse:
-    result = await api_check_integrity(project=project, session=session)
+    result = await api_check_integrity(
+        project=project, session=session, settings=get_settings()
+    )
     ctx = _base_ctx(project, "integrity")
     ctx["result"] = result
     return _render(request, "integrity.html", ctx)
@@ -567,7 +570,9 @@ async def integrity_fragment(
     project: ProjectPath,
     session: SessionDep,
 ) -> HTMLResponse:
-    result = await api_check_integrity(project=project, session=session)
+    result = await api_check_integrity(
+        project=project, session=session, settings=get_settings()
+    )
     return _render(
         request,
         "partials/integrity_body.html",

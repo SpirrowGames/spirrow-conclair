@@ -229,13 +229,20 @@ msg が 1 本も無い thread でのみ `null` / `0` になる (`open_thread` �
   "type": "missing_propose",
   "thread_id": "T-D4-foo",
   "msg_id": null,
-  "details": "Thread has no propose msg or propose msg.author != owner"
+  "details": "Thread has no propose msg or propose msg.author != owner",
+  "has_status_transition_event": null
 }
 ```
 
+`has_status_transition_event` は `closes_thread_by_non_owner` にだけ載る診断値
+(他の type では `null`)。**判定には使わない**。event 側の `msg_id` 列で引くので
+「この msg が書き込み経路に届いたか」を答える — API 経由だが記録されなかった
+(rollback 窓) と、そもそも API を通っていない (直接 INSERT) の区別に使う。
+両者は調査の出発点が正反対で、thread 単位で同じ問いを立てると兄弟 msg の答えを返す。
+
 `type` 一覧:
 - `missing_propose` — thread に propose msg なし、or author 不一致
-- `closes_thread_by_non_owner` — closes_thread を持つ msg の author != thread.owner
+- `closes_thread_by_non_owner` — closes_thread を持つ msg の author != thread.owner で、**かつ close の根拠が記録されていない**。非 owner close には正規の bypass が 2 つある (human Tier-C force-close / PR-gate 台帳 carve-out) ∴ 記録付きは issue にせず`sanctioned_counts` に数え、記録の無い古い行は `unattributable` に出す。4 分岐の表と根拠は `services/close_sanction.py`
 - `invalid_reply_to` — reply_to が同 thread 内に存在しない
 - `dangling_thread_reference` — references_threads の対象 thread が project 内にない
 - `orphan_message` — msg.thread_id が threads に存在しない (FK が壊れる事故)
@@ -598,9 +605,29 @@ CI 実測 (`tests/integration/test_thread_listing_scale.py`、`GET /threads?limi
 {
   "issues": [ /* IntegrityIssue[] */ ],
   "issue_count": 3,
-  "checked_at": "2026-05-01T19:51:59Z"
+  "checked_at": "2026-05-01T19:51:59Z",
+  "sanctioned_counts": { "pr_gate_ledger": 43, "human_override": 2 },
+  "unattributable": [
+    { "thread_id": "T-ADR-001", "msg_id": "msg-004", "reason": "pre_recording" }
+  ],
+  "sanction_recording_since": "2026-09-06T12:00:00Z"
 }
 ```
+
+非 owner close の 4 分岐 (`services/close_sanction.py`):
+
+| 条件 | 出力先 |
+|---|---|
+| `close_sanction.kind` = `pr_gate_ledger` / `human_override` | `sanctioned_counts` (**件数のみ**。行を出すと開発量に比例して報告が伸びる) |
+| `close_sanction` は在るが kind が上記以外 (legacy bool = `unspecified` を含む) | `unattributable` / `unclassified_override` — **時刻に依らず**。これが deploy skew を生存可能にしている |
+| 記録が無く、msg が cutover 以後 | `issues` (`closes_thread_by_non_owner`) |
+| 記録が無く、msg が cutover 以前 / cutover 未設定 | `unattributable` / `pre_recording` |
+
+- 時刻は **msg の `timestamp`**。event の時刻ではない — 捕まえるべき行はまさに event を残さなかった行なので、
+  event から時刻を読むと「不在を検出する仕組みが、その不在に依存する」ことになる。
+- `sanction_recording_since` は `SANCTION_RECORDING_SINCE` 設定の echo。**未設定なら `null` で、
+  どの close も corruption として報告されない** (最も厳しいバケットが無武装)。設定は deploy 手順の一部。
+- 遡及 backfill はしない。cutover 前の行は `unattributable` に凍結され、二度と増えない。
 
 ---
 

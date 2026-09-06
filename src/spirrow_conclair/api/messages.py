@@ -11,13 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from spirrow_conclair.db import SessionDep
 from spirrow_conclair.models import ChatroomEvent, Message, Thread
 from spirrow_conclair.schemas import (
-    Message as MessageSchema,
-)
-from spirrow_conclair.schemas import (
+    CloseSanction,
     PostMessageRequest,
     PostMessageResponse,
 )
+from spirrow_conclair.schemas import (
+    Message as MessageSchema,
+)
 from spirrow_conclair.services import integrity as integrity_svc
+from spirrow_conclair.services.close_sanction import (
+    CLOSE_SANCTION_KEY,
+    UNSPECIFIED_SANCTION,
+)
 from spirrow_conclair.services.msg_id_allocator import allocate_next_msg_id, parse_msg_id
 from spirrow_conclair.services.status_transition import compute_transition
 
@@ -50,6 +55,7 @@ async def post_message_in_session(
     next_participant: str | None = None,
     owner_override: bool = False,
     owner_override_reason: str | None = None,
+    close_sanction: CloseSanction | None = None,
 ) -> tuple[Message, str | None]:
     """Insert a single message + status-transition event (if any).
 
@@ -62,6 +68,14 @@ async def post_message_in_session(
     author is not the owner), the post_message audit event records the
     bypass (``owner_override`` / ``thread_owner`` / ``owner_override_reason``)
     so "who force-closed whose thread, and why" is traceable.
+
+    **This function is the sanction recorder**, and that placement is the
+    property the audit's strictest bucket rests on. Both routes that can write
+    a ``closes_thread`` msg funnel through here (``POST .../messages`` and
+    ``POST .../close``; ``open_thread`` hardcodes ``closes_thread=None``), so
+    "no record" can mean "did not come through the write path". Putting the
+    recorder in the callers instead would make one forgotten call site
+    indistinguishable from a direct INSERT -- see ``services.close_sanction``.
     """
     references_threads = list(references_threads or [])
     related_tasks = list(related_tasks or [])
@@ -163,6 +177,22 @@ async def post_message_in_session(
         post_details["owner_override"] = True
         post_details["thread_owner"] = thread.owner
         post_details["owner_override_reason"] = owner_override_reason
+    # The predicate here is deliberately the *audit's* predicate, spelled the
+    # same way: `audit_project` walks msgs with `closes_thread` set whose
+    # author is not the owner, and every such msg written from here carries a
+    # record. Deriving it from `owner_override` instead would drift the two
+    # apart the moment another clause learns to relax ownership.
+    if closes_thread is not None and author != thread.owner:
+        post_details[CLOSE_SANCTION_KEY] = (
+            close_sanction.model_dump(exclude_none=True)
+            if close_sanction is not None
+            # A bare `owner_override` says a bypass applied and nothing about
+            # which one. Recorded as exactly that rather than inferred from
+            # the presence of `owner_override_reason`: a carve-out caller is
+            # free to pass a reason too, so that proxy would launder a guess
+            # into the audit trail.
+            else dict(UNSPECIFIED_SANCTION)
+        )
     session.add(
         ChatroomEvent(
             project=project,
@@ -213,6 +243,7 @@ async def post_message(
             next_participant=body.next_participant,
             owner_override=body.owner_override,
             owner_override_reason=body.owner_override_reason,
+            close_sanction=body.close_sanction,
         )
 
     return PostMessageResponse(

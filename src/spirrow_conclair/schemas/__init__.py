@@ -18,8 +18,11 @@ from spirrow_conclair.schemas.event import (
     EventListResponse,
     IntegrityCheckResponse,
     IntegrityIssue,
+    SanctionedCloseCounts,
+    UnattributableClose,
 )
 from spirrow_conclair.schemas.message import (
+    CloseSanction,
     CloseThreadRequest,
     CloseThreadResponse,
     Message,
@@ -61,6 +64,7 @@ ThreadView.model_rebuild(_types_namespace={"Message": Message})
 
 __all__ = [
     "ChatroomEvent",
+    "CloseSanction",
     "CloseThreadRequest",
     "CloseThreadResponse",
     "ControlHistoryItem",
@@ -83,6 +87,7 @@ __all__ = [
     "ProjectSummaryListResponse",
     "PutThreadDigestRequest",
     "ReportObservedRequest",
+    "SanctionedCloseCounts",
     "SetControlRequest",
     "Thread",
     "ThreadDigest",
@@ -90,6 +95,7 @@ __all__ = [
     "ThreadListResponse",
     "ThreadStatus",
     "ThreadView",
+    "UnattributableClose",
     "UnreadListResponse",
     "UnreadThreadItem",
 ]

@@ -16,6 +16,9 @@ Invariants enforced (per design v2 §9):
 1. msg.thread_id exists in threads
 2. propose msg is the first msg of its thread, and author == thread.owner
 3. msg with closes_thread set must have type='decide' AND author == thread.owner
+   (the audit half is three-way, not binary: a non-owner close that carries a
+   recorded sanction is counted rather than reported, and one that predates the
+   recorder is neither -- see `services.close_sanction`)
 4. reply_to (when set) must reference a msg in the same thread
 5. references_threads (when set) must all exist in the same project
 6. msg_id uniqueness — enforced by composite PK at the DB layer
@@ -24,6 +27,8 @@ Invariants enforced (per design v2 §9):
 
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import BigInteger, cast, func, select
@@ -33,8 +38,17 @@ from spirrow_conclair.exceptions import (
     ChatroomIntegrityError,
     ChatroomNotFoundError,
 )
-from spirrow_conclair.models import Message, Thread
-from spirrow_conclair.schemas.event import IntegrityIssue
+from spirrow_conclair.models import ChatroomEvent, Message, Thread
+from spirrow_conclair.schemas.event import (
+    IntegrityIssue,
+    SanctionedCloseCounts,
+    UnattributableClose,
+)
+from spirrow_conclair.services.close_sanction import (
+    SanctionRecord,
+    classify_non_owner_close,
+    read_sanction_record,
+)
 from spirrow_conclair.services.msg_id_allocator import format_msg_id, parse_msg_id
 
 
@@ -314,12 +328,87 @@ async def assert_references_threads_exist(
 # ----- full audit report -----
 
 
-async def audit_project(
-    session: AsyncSession, *, project: str
-) -> list[IntegrityIssue]:
-    """Walk all threads and messages of `project`, returning issues found.
+@dataclass
+class AuditReport:
+    """What ``audit_project`` found.
 
-    Never raises; the caller (integrity endpoint) returns 200 with the list.
+    ``issues`` is the part that should be zero on a healthy project. The other
+    two fields exist because a non-owner close is not a two-valued question:
+    counting sanctioned closes as breakage made the number grow with every
+    merged PR, and calling an unrecorded old close "fine" would be a guess.
+    See ``services.close_sanction``.
+    """
+
+    issues: list[IntegrityIssue] = field(default_factory=list)
+    sanctioned_counts: SanctionedCloseCounts = field(
+        default_factory=SanctionedCloseCounts
+    )
+    unattributable: list[UnattributableClose] = field(default_factory=list)
+
+
+async def _fetch_close_evidence(
+    session: AsyncSession, *, project: str, msg_ids: list[str]
+) -> tuple[dict[str, SanctionRecord], set[str]]:
+    """Sanction records and status-transition presence, keyed by *message*.
+
+    ``chatroom_events.msg_id`` is the attribution key: it already exists on
+    the row, so the sanction needs no column of its own and no migration, and
+    the join is per-message rather than per-thread. That matters -- a thread
+    can hold more than one closing msg (a direct INSERT, or two concurrent
+    closes racing on a stale in-memory ``thread.status``), and a thread-level
+    lookup would hand one msg's sanction to the other, hiding exactly the row
+    the audit exists to surface.
+
+    Cost: no index covers ``msg_id``, so this filters within the project --
+    ``idx_events_project_ts`` leads on ``project``, and past that it is a
+    scan. Deliberately not indexed: ``audit_project`` already reads every
+    thread and every message of the project, so this adds a term to a
+    full-project scan rather than a new order of cost, and an index on a
+    write-heavy append-only table earns its keep only if that stops being
+    true. An empty candidate list skips the query entirely.
+    """
+    if not msg_ids:
+        return {}, set()
+
+    rows = (
+        await session.execute(
+            select(ChatroomEvent.msg_id, ChatroomEvent.action, ChatroomEvent.details)
+            .where(
+                ChatroomEvent.project == project,
+                ChatroomEvent.msg_id.in_(msg_ids),
+            )
+            .order_by(ChatroomEvent.id)
+        )
+    ).all()
+
+    records: dict[str, SanctionRecord] = {}
+    with_transition: set[str] = set()
+    for msg_id, action, details in rows:
+        if msg_id is None:
+            continue
+        if action == "status_transition":
+            with_transition.add(msg_id)
+        if msg_id not in records:
+            record = read_sanction_record(details)
+            if record is not None:
+                records[msg_id] = record
+    return records, with_transition
+
+
+async def audit_project(
+    session: AsyncSession,
+    *,
+    project: str,
+    sanction_recording_since: datetime | None = None,
+) -> AuditReport:
+    """Walk all threads and messages of `project`, returning what it found.
+
+    Never raises; the caller (integrity endpoint) returns 200 with the report.
+
+    ``sanction_recording_since`` is the deployment's cutover instant (see
+    ``services.close_sanction``). Left ``None``, no close is reported as
+    corruption -- without a cutover, an unrecorded close is indistinguishable
+    from one written before the recorder existed.
     """
     issues: list[IntegrityIssue] = []
 
@@ -395,7 +484,14 @@ async def audit_project(
                 )
             )
 
-    # Invariant 3 (closes_thread_by_non_owner): closes_thread set + author != owner
+    # Invariant 3 (closes_thread_by_non_owner): closes_thread set + author
+    # != owner. Not every such row is breakage: two sanctioned bypasses exist
+    # (human Tier-C force-close, PR-gate ledger carve-out) and both are
+    # legitimate. What separates them from a corrupt row is the sanction the
+    # write path records against this msg_id -- and, where none exists, whether
+    # the msg predates the recorder. Four outcomes, only one an issue; the
+    # table and its reasoning live in `services.close_sanction`.
+    non_owner_closes: list[Message] = []
     for m in msg_rows:
         if not m.closes_thread:
             continue
@@ -404,6 +500,35 @@ async def audit_project(
             # already reported as orphan
             continue
         if m.author != thread.owner:
+            non_owner_closes.append(m)
+
+    sanction_records, msgs_with_transition = await _fetch_close_evidence(
+        session, project=project, msg_ids=[m.msg_id for m in non_owner_closes]
+    )
+    sanctioned_tally: Counter[str] = Counter()
+    unattributable: list[UnattributableClose] = []
+    for m in non_owner_closes:
+        thread = threads_by_id[m.thread_id]
+        classification = classify_non_owner_close(
+            record=sanction_records.get(m.msg_id),
+            # The message's own timestamp, never its event's. The rows this
+            # has to catch are the ones that produced no event, so reading the
+            # clock off the event would make the detector depend on the very
+            # artifact whose absence it is detecting.
+            msg_timestamp=m.timestamp,
+            sanction_recording_since=sanction_recording_since,
+        )
+        if classification.verdict == "sanctioned":
+            sanctioned_tally[str(classification.kind)] += 1
+        elif classification.verdict == "unattributable":
+            unattributable.append(
+                UnattributableClose(
+                    thread_id=m.thread_id,
+                    msg_id=m.msg_id,
+                    reason=classification.reason or "pre_recording",
+                )
+            )
+        else:
             issues.append(
                 IntegrityIssue(
                     type="closes_thread_by_non_owner",
@@ -411,8 +536,10 @@ async def audit_project(
                     msg_id=m.msg_id,
                     details=(
                         f"Message author='{m.author}' set closes_thread but "
-                        f"thread.owner='{thread.owner}'"
+                        f"thread.owner='{thread.owner}', and no close sanction "
+                        f"was recorded for it"
                     ),
+                    has_status_transition_event=m.msg_id in msgs_with_transition,
                 )
             )
 
@@ -501,7 +628,17 @@ async def audit_project(
                 )
             )
 
-    return issues
+    return AuditReport(
+        issues=issues,
+        # Named explicitly rather than splatted, so the report's fields and the
+        # sanction kinds stay a checked correspondence: a kind that gains no
+        # field here is a type error, not a silently dropped count.
+        sanctioned_counts=SanctionedCloseCounts(
+            pr_gate_ledger=sanctioned_tally["pr_gate_ledger"],
+            human_override=sanctioned_tally["human_override"],
+        ),
+        unattributable=unattributable,
+    )
 
 
 def now_utc() -> datetime:
