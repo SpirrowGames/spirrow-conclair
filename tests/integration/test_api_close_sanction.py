@@ -222,6 +222,46 @@ async def test_an_owner_closing_their_own_thread_records_nothing(
     assert body["unattributable"] == []
 
 
+async def test_owner_self_closes_stay_clean_when_owners_differ(
+    client: AsyncClient,
+) -> None:
+    """One thread is not enough to hold the pin above.
+
+    The ownership predicate is evaluated at exactly one line for the whole
+    invariant; the second loop re-fetches the thread but deliberately never
+    re-checks the author, trusting the list it was handed. So if that lookup
+    were dropped, `thread` would leak from the preceding invariant's loop and
+    every self-close would be compared against a stranger's owner. A lone
+    thread cannot detect that -- its leak target would be itself.
+
+    With N threads under N distinct owners, at most one can be the leak
+    target, so the other N-1 self-closes are compared against the wrong owner
+    and reported as corruption. The `threads` SELECT has no ORDER BY, so which
+    thread would leak is undefined; this shape does not depend on knowing.
+    """
+    owners = {"T-alice": "alice", "T-bob": "bob", "T-carol": "carol"}
+    for thread_id, owner in owners.items():
+        await _open(client, thread_id, owner=owner)
+    for thread_id, owner in owners.items():
+        r = await client.post(
+            f"/v1/projects/p/threads/{thread_id}/close",
+            json={
+                "summary_content": "done",
+                "author": owner,
+                # Explicit: the recorded cutover is what splits an unrecorded
+                # close from a pre-recording one, so leaving this to the wall
+                # clock would make the bucket depend on the day it runs.
+                "timestamp": AFTER_CUTOVER.isoformat(),
+            },
+        )
+        assert r.status_code == 201, r.text
+
+    body = await _audit(client)
+    assert body["issue_count"] == 0, body["issues"]
+    assert body["unattributable"] == []
+    assert body["sanctioned_counts"] == {"pr_gate_ledger": 0, "human_override": 0}
+
+
 # ----- pin 3 / 8: an unrecorded close is still reported, exactly once -----
 
 
