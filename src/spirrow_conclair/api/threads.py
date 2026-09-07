@@ -8,7 +8,7 @@ GET  /v1/projects/{project}/threads/{id} — get_thread (mode=full|summary,
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Path, Query, status
@@ -21,15 +21,17 @@ from spirrow_conclair.models import ChatroomEvent, Message, Thread
 from spirrow_conclair.schemas import (
     CloseThreadRequest,
     CloseThreadResponse,
-    Message as MessageSchema,
-)
-from spirrow_conclair.schemas import (
     OpenThreadRequest,
     OpenThreadResponse,
-    Thread as ThreadSchema,
     ThreadListResponse,
     ThreadStatus,
     ThreadView,
+)
+from spirrow_conclair.schemas import (
+    Message as MessageSchema,
+)
+from spirrow_conclair.schemas import (
+    Thread as ThreadSchema,
 )
 from spirrow_conclair.services import integrity as integrity_svc
 from spirrow_conclair.services.digest import fetch_digest_response
@@ -84,7 +86,7 @@ async def open_thread(
     body: OpenThreadRequest,
     session: SessionDep,
 ) -> OpenThreadResponse:
-    timestamp = body.timestamp or datetime.now(timezone.utc)
+    timestamp = body.timestamp or datetime.now(UTC)
 
     async with session.begin():
         # Reject if a thread with the same id already exists in this project.
@@ -400,11 +402,6 @@ async def close_thread(
         # gated by Magickit) skips the ownership clause only.
         assert_owner_can_close(thread, body.author, owner_override=body.owner_override)
 
-        # affects_threads is a thread-level field; patch it before
-        # post_message_in_session so it's persisted in the same txn.
-        if body.affects_threads:
-            thread.affects_threads = list(body.affects_threads)
-
         msg_orm, _transition = await post_message_in_session(
             session,
             project=project,
@@ -430,6 +427,17 @@ async def close_thread(
             owner_override_reason=body.owner_override_reason,
             close_sanction=body.close_sanction,
         )
+        # affects_threads is a thread-level field patched *after*
+        # post_message_in_session, not before. The row-lock refresh inside
+        # that call reloads every column from the DB, so a pre-call
+        # assignment would be silently discarded (SQLAlchemy's refresh
+        # overwrites pending attribute changes on the reloaded instance).
+        # Assigning after the refresh keeps the change in the same txn --
+        # the outer ``session.begin()`` flushes it on commit alongside the
+        # msg row and status transition -- and preserves the semantics the
+        # ``test_owner_can_close`` assertion pins.
+        if body.affects_threads:
+            thread.affects_threads = list(body.affects_threads)
         # Inside the txn, after post_message_in_session flushed the decide
         # msg -- so the count includes the msg this call just wrote.
         rollup = await fetch_thread_rollup(

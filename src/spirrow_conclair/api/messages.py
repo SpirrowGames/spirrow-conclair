@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Path, status
@@ -80,7 +80,45 @@ async def post_message_in_session(
     references_threads = list(references_threads or [])
     related_tasks = list(related_tasks or [])
     tags = list(tags or [])
-    timestamp = timestamp or datetime.now(timezone.utc)
+    timestamp = timestamp or datetime.now(UTC)
+
+    # The one place a per-thread row lock is taken, and the reason the
+    # assert/transition block below can read `thread.status` and trust it.
+    # ``SELECT ... FOR UPDATE`` on the thread row serialises every writer
+    # against the same thread until this transaction commits: whichever
+    # request wins the lock reads the newest committed state, does the
+    # read-modify-write, and releases; the next request then sees the
+    # committed result and is refused (or accepted) by the existing
+    # ``compute_transition`` / ``assert_closes_thread_rule`` rules with
+    # no new error type introduced.
+    #
+    # ``session.refresh(..., with_for_update=True)``, not a bare
+    # ``SELECT FOR UPDATE``, because the caller has already loaded this
+    # ORM instance (``fetch_thread_or_raise``). A second ``select()``
+    # would take the row lock but hand back the identity-map instance
+    # with its stale attributes still in place -- ``populate_existing``
+    # off, no attribute merge -- so the lock would be held while
+    # ``thread.status`` remained the pre-race value the race exists to
+    # invalidate. ``refresh`` reloads the attributes as part of the
+    # locking read; that reload is what makes the lock load-bearing.
+    #
+    # The single choke point matters. ``post_message_in_session`` is the
+    # only path that writes a msg to an existing thread (open_thread
+    # constructs a fresh row and has no competitor), so one line here
+    # covers every write route; a per-caller ``FOR UPDATE`` on the outer
+    # ``fetch_thread_or_raise`` would still be correct today but would
+    # lose the guarantee the first time a new caller forgot to add it.
+    # ``git grep with_for_update`` returning exactly one hit is how a
+    # reviewer can see that guarantee has not drifted.
+    #
+    # Lock order across the transaction is row(thread) -> advisory
+    # (project) -- consistent for every writer (the allocator takes the
+    # advisory lock; nothing takes them in the reverse order), so this
+    # cannot deadlock. READ COMMITTED is assumed; on REPEATABLE READ or
+    # SERIALIZABLE the refresh would either read the same snapshot
+    # (defeating the fix) or raise a 40001 serialization failure at
+    # lock time, and this design would need to be revisited.
+    await session.refresh(thread, with_for_update=True)
 
     # Pre-write asserts (each raises ChatroomIntegrityError on violation).
     await integrity_svc.assert_propose_invariant(
