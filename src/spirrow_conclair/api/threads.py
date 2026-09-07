@@ -454,8 +454,25 @@ async def close_thread(
         # the outer ``session.begin()`` flushes it on commit alongside the
         # msg row and status transition -- and preserves the semantics the
         # ``test_owner_can_close`` assertion pins.
-        if body.affects_threads:
-            thread.affects_threads = list(body.affects_threads)
+        #
+        # Unconditional assignment, deliberately. ``body.affects_threads``
+        # is ``list[str] = Field(default_factory=list)`` on the schema
+        # (see ``CloseThreadRequest``), so Pydantic makes it always a
+        # list -- never ``None`` -- and an omitted field is
+        # indistinguishable from an explicit ``[]``. The previous ``if
+        # body.affects_threads:`` guard therefore only *looked* like it
+        # preserved an old non-empty value on an empty request; there is
+        # no reachable state where that matters. ``open_thread``
+        # initialises the column to ``[]`` and this is the only route
+        # that writes it, so a caller who sends ``[]`` is either
+        # explicitly clearing (from ``[]`` to ``[]`` -- no-op) or leaving
+        # it alone (still ``[]``). The unconditional form removes a
+        # false-optimisation conditional that implied a nullable schema
+        # this repo does not have. A future ``list[str] | None`` schema
+        # that carried "no change" semantics would need an ``is not
+        # None`` gate here **and** a schema change; today, neither
+        # exists.
+        thread.affects_threads = list(body.affects_threads)
         # Inside the txn, after post_message_in_session flushed the decide
         # msg -- so the count includes the msg this call just wrote.
         rollup = await fetch_thread_rollup(

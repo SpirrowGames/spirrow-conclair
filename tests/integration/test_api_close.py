@@ -37,6 +37,48 @@ async def test_owner_can_close(client: AsyncClient) -> None:
     assert body["decide_msg"]["closes_thread"] == "T-1"
 
 
+async def test_close_with_omitted_affects_threads_stays_empty(
+    client: AsyncClient,
+) -> None:
+    """A close request that omits ``affects_threads`` leaves the field ``[]``.
+
+    Pins the current schema's semantics: ``CloseThreadRequest.affects_threads``
+    is ``list[str] = Field(default_factory=list)`` (never nullable), so an
+    omitted body field is indistinguishable from an explicit ``[]``. Both
+    paths land on the same closed thread with ``affects_threads = []``.
+    """
+    await _open(client, "T-1", owner="alice")
+    r = await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={"summary_content": "done", "author": "alice"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["thread"]["affects_threads"] == []
+
+
+async def test_close_with_explicit_empty_affects_threads_stays_empty(
+    client: AsyncClient,
+) -> None:
+    """The same, when the caller sends ``affects_threads: []`` explicitly.
+
+    Together with the omitted-field test above, pins that the write path
+    handles the two indistinguishable inputs identically and does not, for
+    example, corrupt the column, write ``None``, or leave a stale value
+    behind from an earlier read.
+    """
+    await _open(client, "T-1", owner="alice")
+    r = await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={
+            "summary_content": "done",
+            "author": "alice",
+            "affects_threads": [],
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["thread"]["affects_threads"] == []
+
+
 async def test_non_owner_close_returns_403(client: AsyncClient) -> None:
     await _open(client, "T-1", owner="alice")
     r = await client.post(
