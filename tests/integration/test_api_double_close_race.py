@@ -13,14 +13,61 @@ producing `status='awaiting_reply'` alongside `resolved_by_msg` set, an
 
 These tests pin the fix from both sides: the write route must serialise
 against another writer on the same thread, but writers against
-*different* threads must still proceed independently. They are
-interleaved deterministically -- one task is held on an asyncio barrier
+*different* threads must still proceed independently.
+
+What that amounts to, and what it does not, is worth stating exactly,
+because the gap was found by measuring and not by reading. The barrier
+tests below pin that the deciding read is a genuine *reload* of committed
+state rather than the caller's already-loaded instance. The serialisation
+tests pin that writes to one thread queue while writes to different
+threads do not. Neither pins that the *lock* is what does the queueing:
+the `last_msg_num` UPDATE later in the same transaction takes the same row
+lock on its own account, so **both stay green with `with_for_update`
+removed entirely** -- 0 failures in 5 runs each, measured on a probe
+branch in CI (msg-459, analysed in msg-460 §2).
+
+That the deciding read asks for the lock at all is therefore pinned
+nowhere here; it is pinned statically, in
+`tests/unit/test_row_lock_is_at_the_choke_point.py`. That Postgres then
+honours the request is assumed, not tested by anything we own. The full
+four-level table lives in that file's module docstring, and it is the only
+copy -- do not restate it here.
+
+These tests are interleaved
+deterministically -- one task is held on an asyncio barrier
 placed *at the entry to* `post_message_in_session`, before any DB lock
 is acquired, so a paused task holds no row lock and a second task can
-sail through without a test-runner deadlock. Seams past the lock would
-livelock the runner: the paused task would already hold the row, and
-the second task's `refresh` would block on it, waiting for a release
-the runner never issues.
+sail through without a test-runner deadlock.
+
+Why the seam is in front of the lock and not behind it
+------------------------------------------------------
+
+A seam whose *release depends on the other task finishing* livelocks the
+runner, and this is a real circular wait rather than a rule of thumb: the
+paused task holds the row, the second task's `refresh` blocks on it, and
+the release the first is waiting for can now never arrive. Nothing in the
+test acts as a third party.
+
+A seam released by a **timer** does not have that shape -- the clock does
+not care whether the second task is blocked -- so "no seam may sit past
+the lock" is broader than its own reason, and an earlier version of this
+docstring asserted the broad form. It is still the rule here, but for a
+different and weaker reason: a released-by-clock seam was designed
+(msg-460 §5.2), reviewed and **declined on cost** (msg-481, msg-482 §1).
+Its oracle would have been wall-clock time, and the serialisation tests
+below already show what that buys -- their own docstring admits a loaded
+runner can make them pass for the wrong reason. A second test with the
+same weakness, to observe a lock Postgres is responsible for taking, was
+not worth its upkeep.
+
+So: not impossible, decided against. What that seam would have watched --
+that the deciding read asks for `FOR UPDATE` on every call -- is pinned
+statically instead, in
+`tests/unit/test_row_lock_is_at_the_choke_point.py`, whose module
+docstring carries the P1..P4" table this paragraph is one row of. If you
+are here because you want to add a seam past the lock, the question to
+answer first is not whether it deadlocks (it need not) but what its
+oracle is.
 
 The concurrency comes from `asyncio.create_task` + `AsyncClient` +
 `ASGITransport`, which delivers requests to the app in-process against
