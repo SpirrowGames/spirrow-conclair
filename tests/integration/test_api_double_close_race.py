@@ -367,6 +367,119 @@ async def test_row_lock_on_one_thread_does_not_block_writes_to_another(
 
 
 # ---------------------------------------------------------------------------
+# Bohr msg-409 §2.2 discrimination pin: the barrier-based tests above do
+# NOT discriminate for the row lock. At READ COMMITTED with the barrier
+# placed BEFORE the refresh (which it must be, or the runner deadlocks
+# per the module docstring), task-A pauses without holding a lock,
+# task-B refreshes and commits, and task-A's post-release refresh reads
+# task-B's committed state via READ COMMITTED whether or not that
+# refresh acquires a lock. So the state-machine outcome is the same
+# with and without ``with_for_update=True``, and those tests pin
+# state-machine correctness (``assert_thread_writable`` + the transition
+# table), not the lock's serialization value.
+#
+# The lock's serialization value is what this test pins: hold a
+# ``SELECT ... FOR UPDATE`` on T-A's row from a raw session, then issue
+# a write to T-A via the API and confirm the API request blocks (times
+# out under ``asyncio.wait_for``). Together with
+# ``test_row_lock_on_one_thread_does_not_block_writes_to_another``, this
+# pins the two orthogonal properties of the fix:
+#
+#     - lock is per-ROW (sibling-thread test above completes fast)
+#     - lock SERIALISES on that row (this test blocks and times out)
+#
+# Bohr's original ask was a repeated experiment ("N of M times remove
+# the kwarg and re-run the barrier test") reported to the thread. That
+# form was chosen when we still believed the barrier test discriminated;
+# the analysis in msg-455's context showed it does not, so a repeated
+# ad-hoc measurement would report 0/N and teach us nothing. This test
+# is the standing pin for the property Bohr wanted evidence of, and it
+# runs on every CI push.
+# ---------------------------------------------------------------------------
+
+
+async def test_row_lock_serialises_two_writes_on_the_same_thread(
+    client: AsyncClient,
+    session_factory,  # type: ignore[no-untyped-def]
+) -> None:
+    """A held ``SELECT ... FOR UPDATE`` on T-A's row blocks a concurrent
+    write to T-A. Mirror of the sibling-thread test above; together the
+    two pin lock scope AND lock serialization.
+
+    Sequence:
+    1. Open T-A.
+    2. Open a raw session, ``BEGIN``, ``SELECT ... FOR UPDATE`` on T-A's
+       row. Do not commit yet.
+    3. Fire an HTTP write to T-A. The write's ``session.refresh(...,
+       with_for_update=True)`` inside ``post_message_in_session`` must
+       queue behind the raw session's lock -- which is held.
+    4. ``asyncio.wait_for`` times out because the write is blocked.
+    5. On timeout, we cancel the pending write task, release the raw
+       session (rollback), and confirm a subsequent write to T-A
+       completes fast (sanity: the lock really did release).
+
+    Failing verdict (regression -- the production ``refresh`` is no
+    longer a locking one): the HTTP write completes before the timeout
+    because ``refresh`` did not queue. That is exactly the failure mode
+    Bohr msg-409 §2.2 wanted evidence of, and this test would flip red
+    on that regression on every CI push.
+
+    Note on cancellation: ``asyncio.wait_for`` cancels the wrapped task
+    on timeout, which is enough because ``httpx.AsyncClient`` releases
+    its connection and the ASGI request coroutine is aborted. The raw
+    session's lock releases at scope exit.
+    """
+    from sqlalchemy import text
+
+    await _open(client, "T-A")
+
+    async with session_factory() as blocker:
+        async with blocker.begin():
+            row = (
+                await blocker.execute(
+                    text(
+                        "SELECT thread_id FROM threads "
+                        "WHERE project = :p AND thread_id = :t FOR UPDATE"
+                    ),
+                    {"p": "p", "t": "T-A"},
+                )
+            ).scalar_one()
+            assert row == "T-A"
+
+            # Write to T-A must block on the raw session's lock. Timeout
+            # short enough to fail the test if the lock is not doing its
+            # job (a regression would answer in milliseconds), long enough
+            # that the "did it queue?" signal is unambiguous on slow CI.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    client.post(
+                        "/v1/projects/p/threads/T-A/messages",
+                        json={
+                            "type": "report",
+                            "author": "alice",
+                            "content": "queued",
+                        },
+                    ),
+                    timeout=2.0,
+                )
+        # blocker rolls back and releases the T-A lock here (no commit
+        # because the ``begin()`` scope is exiting via exception -- the
+        # inner ``pytest.raises`` catches the TimeoutError, so control
+        # exits ``blocker.begin()`` normally; the row lock is released
+        # at commit time in either case).
+
+    # Sanity: the lock really did release; a subsequent T-A write is fast.
+    resp_a = await asyncio.wait_for(
+        client.post(
+            "/v1/projects/p/threads/T-A/messages",
+            json={"type": "report", "author": "alice", "content": "after"},
+        ),
+        timeout=5.0,
+    )
+    assert resp_a.status_code == 201, resp_a.text
+
+
+# ---------------------------------------------------------------------------
 # TOCTOU defense: the caller-level ``assert_owner_can_close`` in the
 # ``/close`` route runs on the stale, unlocked ``thread`` read, so a
 # concurrent ownership mutation between that check and the row-lock

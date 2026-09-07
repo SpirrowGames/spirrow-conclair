@@ -45,6 +45,18 @@ def compute_transition(
     if new_msg.type == "decide" and new_msg.closes_thread == thread.thread_id:
         if thread.status in _OPEN_STATUSES:
             return ("resolved", {"resolved_by_msg": new_msg.msg_id})
+        # Unreachable via the API write path after R2 (msg-406 §5.1):
+        # ``assert_thread_writable`` refuses every write to a resolved /
+        # superseded / parked thread with ``ChatroomStateError`` before
+        # this function is called, so an API caller can never reach this
+        # branch. The raise stays anyway because ``compute_transition``
+        # is a pure function -- callers that are not the write path
+        # (unit tests, future services, a repair script) need the
+        # contract to hold on its own terms. Removing it would trade a
+        # local, obvious guard for "R2 is the only defence, forever";
+        # ``test_decide_closes_closed_thread_raises_state_error`` in
+        # tests/unit/test_status_transition.py pins the pure-function
+        # contract independently of the API layer.
         raise ChatroomStateError(
             f"Cannot close thread '{thread.thread_id}' in status='{thread.status}'",
             details={

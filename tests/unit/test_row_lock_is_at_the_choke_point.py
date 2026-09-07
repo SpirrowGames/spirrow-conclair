@@ -50,16 +50,31 @@ def _count_row_lock_calls(src: str) -> int:
       whose ``func`` is an ``Attribute`` with ``attr='with_for_update'``.
       The canonical query-level lock idiom; a text scan for the phrase
       as a keyword catches zero of these.
-    - **keyword form**: ``session.refresh(thread, with_for_update=True)``.
+    - **keyword form**: ``session.refresh(thread, with_for_update=X)``.
       The row-lock variant of ``AsyncSession.refresh`` (and of anything
-      else that accepts it as a keyword). Only ``=True`` counts;
-      ``=False`` is a SQLAlchemy no-op.
+      else that accepts it as a keyword). Counted for every ``X`` **except**
+      the two literal values SQLAlchemy treats as "do not lock":
+      ``ast.Constant`` with value ``False`` and ``ast.Constant`` with value
+      ``None``. Everything else -- ``=True``, a dict of options
+      (``{"nowait": True}``), a variable name, a function call, any
+      expression the parser cannot statically prove is one of those two
+      no-op literals -- counts as a lock acquisition.
 
-    A previous form checked only the keyword; a developer could quietly
-    add ``select(Thread).with_for_update()`` in a new file and the
-    choke-point invariant would silently regress. That regression was
-    the exact failure this counter exists to catch, so both forms are
-    now first-class.
+    The rule for the keyword branch is deliberately **negate the known-safe
+    set**, not "match the known-lock set". Bohr's msg-455 §9.A: a false
+    positive costs a developer one moment of thought, but a false negative
+    compromises the invariant entirely and silently. Any other cost split
+    would allow a canonical SQLAlchemy call to slip past the counter --
+    ``with_for_update={"nowait": True}`` and ``with_for_update=some_flag``
+    are both proper lock idioms and neither would be caught by "must be
+    literal True".
+
+    A previous form checked only the literal-True keyword; a developer
+    could quietly add ``select(Thread).with_for_update()`` in a new file,
+    or pass a dict of options, and the choke-point invariant would
+    silently regress. Both regressions are what this counter exists to
+    catch, so both forms and every non-no-op keyword value are now
+    first-class.
 
     Docstrings, exception messages, and other string literals do not
     count -- the AST distinguishes a call from a mention. A syntax
@@ -80,16 +95,28 @@ def _count_row_lock_calls(src: str) -> int:
             count += 1
             continue
 
-        # keyword form: ``f(..., with_for_update=True)``
+        # keyword form: ``f(..., with_for_update=X)``. Negate-known-safe:
+        # only skip when X is *provably* the SQLAlchemy no-op (literal
+        # False or literal None). Every other value counts -- including
+        # dynamic expressions the parser cannot decide.
         for kw in node.keywords:
             if kw.arg != "with_for_update":
                 continue
-            if isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                count += 1
-                # A single call cannot lock twice; break so a duplicate kw
-                # (syntactically odd but legal expression) is not
-                # double-counted per call.
+            if isinstance(kw.value, ast.Constant) and (
+                kw.value.value is False or kw.value.value is None
+            ):
+                # Known-safe no-op: SQLAlchemy issues no FOR UPDATE for
+                # literal False or literal None. Compared with ``is``, not
+                # ``in (False, None)``, because ``0 == False`` is True in
+                # Python and a stray ``with_for_update=0`` should not be
+                # silently exempted -- it is not a known-safe idiom.
+                # Do NOT count.
                 break
+            count += 1
+            # A single call cannot lock twice; break so a duplicate kw
+            # (syntactically odd but legal expression) is not
+            # double-counted per call.
+            break
     return count
 
 
@@ -185,6 +212,59 @@ async def h(session, thread):
     await session.refresh(thread, with_for_update=False)
 """
     assert _count_row_lock_calls(with_a_falsy_call) == 0
+
+
+def test_ast_counter_ignores_with_for_update_none_the_sqlalchemy_default() -> None:
+    """``with_for_update=None`` is SQLAlchemy's default and issues no ``FOR
+    UPDATE``. It must not count against the choke-point invariant.
+
+    Pinned by name and docstring so a future "help, the counter is
+    over-eager" refactor does not silently switch this to "count
+    everything, including None": the whole point of the negate-known-safe
+    rule is that ``None`` and ``False`` are the *only* two literal values
+    the parser is allowed to prove safe. Any other change to this
+    predicate needs to explain why the new safe-set is provably
+    exhaustive.
+    """
+    with_a_none_call = """
+async def h(session, thread):
+    await session.refresh(thread, with_for_update=None)
+"""
+    assert _count_row_lock_calls(with_a_none_call) == 0
+
+
+def test_ast_counter_counts_dynamic_variable_form() -> None:
+    """``with_for_update=some_flag`` counts even though the parser cannot
+    prove which branch fires.
+
+    A developer plumbing a runtime flag into the lock parameter is
+    acquiring a row lock **when the flag is truthy**. The counter cannot
+    peek at runtime, so it takes the safe side: any value that is not the
+    two literal no-op constants counts. Regression pin for msg-455 §2's
+    "dynamic ``Name``" case, which the previous literal-True-only counter
+    silently ignored.
+    """
+    dynamic_form = """
+async def h(session, thread, flag):
+    await session.refresh(thread, with_for_update=flag)
+"""
+    assert _count_row_lock_calls(dynamic_form) == 1
+
+
+def test_ast_counter_counts_dict_options_form() -> None:
+    """``with_for_update={"nowait": True}`` counts.
+
+    SQLAlchemy accepts a dict of lock options (nowait, skip_locked, of,
+    read, key_share) in the same parameter that also takes True/False.
+    A dict is a lock acquisition, full stop. Regression pin for the
+    speculative-blind-spot advisory flagged on PR #19 (msg-393) and
+    graduated to a real defect in the PR #21 gate review (msg-455 §2).
+    """
+    dict_form = """
+async def h(session, thread):
+    await session.refresh(thread, with_for_update={"nowait": True})
+"""
+    assert _count_row_lock_calls(dict_form) == 1
 
 
 def test_ast_counter_finds_method_call_form() -> None:

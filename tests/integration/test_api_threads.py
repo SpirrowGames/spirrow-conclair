@@ -227,14 +227,21 @@ async def test_summary_mode_returns_only_the_resolving_decide_not_stray_ones(
     assert body["messages"][0]["msg_id"] == real_decide_id
 
 
-async def test_summary_mode_on_resolved_without_resolved_by_msg_is_empty(
+async def test_summary_mode_returns_empty_to_surface_inconsistent_resolved(
     client: AsyncClient, db_session,
 ) -> None:
     """R3 corollary: a resolved thread with NULL ``resolved_by_msg`` is an
     ``inconsistent_resolved`` audit finding (a real bug, reported elsewhere).
-    The summary mode returns zero rows in that case rather than covering
-    the corruption with a lucky "any decide" guess: an empty summary is a
-    signal, a spurious match is a false calm.
+    The summary mode returns zero rows in that case **precisely so it does
+    not hide the ``inconsistent_resolved`` finding** by producing a lucky
+    "any decide" match that would let the corruption pass unnoticed.
+
+    Bohr msg-409 §2.3 fixed the rationale into the test name so a future
+    reader auditing "why does the API return an empty summary in this
+    case?" gets the load-bearing answer -- surface the audit finding, do
+    not paper over it -- from the test's own identifier, not from
+    guessing that empty was the "safe default". An empty summary is a
+    signal; a spurious match is a false calm.
     """
     from sqlalchemy import text as sql_text
 
