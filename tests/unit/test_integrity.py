@@ -13,23 +13,30 @@ from datetime import datetime, timezone
 
 import pytest
 
-from spirrow_conclair.exceptions import ChatroomIntegrityError
+from spirrow_conclair.exceptions import ChatroomIntegrityError, ChatroomStateError
 from spirrow_conclair.models import Thread
 from spirrow_conclair.services.integrity import (
     assert_closes_thread_rule,
     assert_next_participant_rule,
+    assert_thread_writable,
 )
 
 
-def _thread(owner: str = "alice", thread_id: str = "T-1") -> Thread:
+def _thread(
+    owner: str = "alice",
+    thread_id: str = "T-1",
+    status: str = "active",
+    resolved_by_msg: str | None = None,
+) -> Thread:
     return Thread(
         project="p",
         thread_id=thread_id,
         title="t",
         owner=owner,
-        status="active",
+        status=status,
         created_at=datetime.now(timezone.utc),
         created_by_msg="msg-001",
+        resolved_by_msg=resolved_by_msg,
     )
 
 
@@ -180,3 +187,70 @@ def test_no_value_is_special_on_a_closing_msg_either(name: str) -> None:
     # about the field being *set*, not about which string it holds.
     with pytest.raises(ChatroomIntegrityError):
         assert_next_participant_rule(next_participant=name, closes_thread="T-1")
+
+
+# assert_thread_writable — msg-406 §5.1.
+#
+# The pair this refuses is a settled thread taking a new message. It runs
+# **after** the row-lock refresh in `post_message_in_session`, so a passing
+# check reflects the newest committed status; the tests below cover the
+# pure predicate.
+
+
+@pytest.mark.parametrize("status", ["active", "awaiting_reply"])
+def test_writable_when_thread_is_open(status: str) -> None:
+    # No exception on either open status — both are writable.
+    assert_thread_writable(_thread(status=status))
+
+
+@pytest.mark.parametrize("status", ["superseded", "parked"])
+def test_writable_when_thread_is_non_resolved_terminal(status: str) -> None:
+    # msg-406 §5.3 non-goal: superseded / parked are deliberately not
+    # refused by this assert. `parked` carries an active re-parenting
+    # workflow that writes to it; `superseded` has no `resolved_by_msg`
+    # and reads differently -- both are open questions the msg-406 disposition
+    # explicitly declined to answer. A regression that added them to the set
+    # would fire here.
+    assert_thread_writable(_thread(status=status))
+
+
+def test_resolved_thread_is_refused_with_state_error() -> None:
+    # The msg-405/msg-406 disposition: resolved is terminal for writes,
+    # and the refusal is `ChatroomStateError` -> 409 (the same class the
+    # pre-existing re-close path already surfaces).
+    with pytest.raises(ChatroomStateError) as ei:
+        assert_thread_writable(
+            _thread(status="resolved", resolved_by_msg="msg-042")
+        )
+    # `resolved` in the message so callers can grep -- the `test_re_close`
+    # assertion in test_api_close.py reads exactly this substring.
+    assert "resolved" in ei.value.message
+
+
+def test_refusal_details_include_resolved_by_msg_pointer() -> None:
+    # The refused caller (typically an agent) needs a machine-readable
+    # pointer to the decision. msg-406 §5.1: "断られた client (多くは agent)
+    # に『決着はここにある / 続けたいなら新しいスレッド』を機械可読で返す".
+    with pytest.raises(ChatroomStateError) as ei:
+        assert_thread_writable(
+            _thread(status="resolved", resolved_by_msg="msg-042")
+        )
+    assert ei.value.details == {
+        "thread_id": "T-1",
+        "status": "resolved",
+        "resolved_by_msg": "msg-042",
+    }
+
+
+def test_refusal_details_pass_through_null_resolved_by_msg() -> None:
+    # A resolved thread with a NULL `resolved_by_msg` is an
+    # `inconsistent_resolved` audit finding (see `audit_project`), but
+    # this assert still fires -- refusing a write to a corrupted-terminal
+    # thread is at least as correct as accepting it. The details field
+    # carries the NULL through untouched so the caller can see what the
+    # server actually holds, not a substituted default.
+    with pytest.raises(ChatroomStateError) as ei:
+        assert_thread_writable(
+            _thread(status="resolved", resolved_by_msg=None)
+        )
+    assert ei.value.details["resolved_by_msg"] is None

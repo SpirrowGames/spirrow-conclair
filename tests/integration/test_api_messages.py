@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from httpx import AsyncClient
 
 
@@ -200,3 +201,137 @@ async def test_concurrent_msg_id_allocation(client: AsyncClient) -> None:
     msg_ids = sorted(m["msg_id"] for m in r.json()["messages"])
     expected = sorted([f"msg-{i:03d}" for i in range(1, 22)])
     assert msg_ids == expected
+
+
+# ---- resolved-terminal refusal (msg-406 §5.1) ----------------------------
+#
+# The pair these tests refuse is a settled thread taking a new message,
+# for every ``type``. Refusing decide alone would leave open the two-msg
+# variant of invariant 7's paired state (close-turns-1 + handoff-turns-2)
+# -- msg-406 §2 is explicit that the point of these tests is to pin the
+# refusal on *every* type, not just decide.
+
+
+async def _close(client: AsyncClient, project: str, thread_id: str) -> str:
+    r = await client.post(
+        f"/v1/projects/{project}/threads/{thread_id}/close",
+        json={"summary_content": "done", "author": "alice"},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["decide_msg"]["msg_id"]
+
+
+@pytest.mark.parametrize(
+    "msg_type,extra",
+    [
+        ("question", {}),
+        ("answer", {}),
+        ("report", {}),
+        ("handoff", {}),
+        ("ack", {}),
+        # decide *without* closes_thread also refused: the write path is
+        # `post_message_in_session`, and the assert runs before any type
+        # branch. The decide-with-closes_thread case is separately covered
+        # by `test_re_close_returns_409_state_error` (test_api_close.py).
+        ("decide", {}),
+    ],
+)
+async def test_post_to_resolved_thread_is_refused_regardless_of_type(
+    client: AsyncClient, msg_type: str, extra: dict
+) -> None:
+    await _open(client, "p", "T-1")
+    decide_id = await _close(client, "p", "T-1")
+
+    code, body = await _post(
+        client, "p", "T-1",
+        type=msg_type, author="bob", content="after-decide", **extra,
+    )
+    assert code == 409, body
+    assert body["error_type"] == "ChatroomStateError"
+    assert "resolved" in body["error"]
+
+    # Machine-readable pointer: "the settled thread is *this* msg, and if
+    # you want to continue the topic, open a new thread and reference it".
+    assert body["details"]["thread_id"] == "T-1"
+    assert body["details"]["status"] == "resolved"
+    assert body["details"]["resolved_by_msg"] == decide_id
+
+
+async def test_refused_post_writes_nothing(client: AsyncClient) -> None:
+    """The refusal has to leave no trace. A rejected write that still
+    allocated a msg_id, incremented ``last_msg_num``, or emitted a
+    ``post_message`` event would be worse than the acceptance the rule
+    exists to prevent -- the ordering property downstream reads (§5.2)
+    would break where a future R3-style filter cannot repair it.
+    """
+    await _open(client, "p", "T-1")
+    decide_id = await _close(client, "p", "T-1")
+
+    before = await client.get("/v1/projects/p/threads/T-1?mode=full")
+    before_body = before.json()
+    events_before = await client.get("/v1/projects/p/events?thread_id=T-1")
+    n_events_before = len(events_before.json()["items"])
+
+    code, _ = await _post(
+        client, "p", "T-1",
+        type="report", author="bob", content="ignored",
+    )
+    assert code == 409
+
+    after = await client.get("/v1/projects/p/threads/T-1?mode=full")
+    after_body = after.json()
+    # No new msg row, and last_msg_id is still the decide.
+    assert after_body["thread"]["last_msg_id"] == decide_id
+    assert after_body["thread"]["msg_count"] == before_body["thread"]["msg_count"]
+    assert [m["msg_id"] for m in after_body["messages"]] == [
+        m["msg_id"] for m in before_body["messages"]
+    ]
+
+    # No new event row either -- a post_message event would have been the
+    # smoking gun for a half-applied write.
+    events_after = await client.get("/v1/projects/p/events?thread_id=T-1")
+    assert len(events_after.json()["items"]) == n_events_before
+
+
+# msg-406 §5.3 non-goal: superseded and parked are deliberately not
+# refused. These two tests pin that the msg-406 disposition did not
+# accidentally widen the terminal-for-writes set. If a later contributor
+# adds superseded or parked to `_WRITE_TERMINAL_STATUS`, they will fire
+# here and force the reasoning back into review.
+
+
+async def test_post_to_parked_thread_is_still_accepted(
+    client: AsyncClient, db_session
+) -> None:
+    from sqlalchemy import text as sql_text
+
+    await _open(client, "p", "T-1")
+    # ``parked`` is not writable through any API today, so poke the row
+    # directly. This is the same shape ``test_api_close_sanction.py`` uses
+    # to seed statuses that no HTTP path constructs.
+    await db_session.execute(
+        sql_text("UPDATE threads SET status = 'parked' WHERE thread_id = 'T-1'")
+    )
+    await db_session.commit()
+
+    code, body = await _post(
+        client, "p", "T-1", type="report", author="alice", content="on parked",
+    )
+    assert code == 201, body
+
+
+async def test_post_to_superseded_thread_is_still_accepted(
+    client: AsyncClient, db_session
+) -> None:
+    from sqlalchemy import text as sql_text
+
+    await _open(client, "p", "T-1")
+    await db_session.execute(
+        sql_text("UPDATE threads SET status = 'superseded' WHERE thread_id = 'T-1'")
+    )
+    await db_session.commit()
+
+    code, body = await _post(
+        client, "p", "T-1", type="report", author="alice", content="on superseded",
+    )
+    assert code == 201, body

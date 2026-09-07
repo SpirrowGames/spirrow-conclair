@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from spirrow_conclair.exceptions import (
     ChatroomIntegrityError,
     ChatroomNotFoundError,
+    ChatroomStateError,
 )
 from spirrow_conclair.models import ChatroomEvent, Message, Thread
 from spirrow_conclair.schemas.event import (
@@ -52,6 +53,62 @@ from spirrow_conclair.services.close_sanction import (
 from spirrow_conclair.services.msg_id_allocator import format_msg_id, parse_msg_id
 
 # ----- pre-write asserts -----
+
+
+#: The one status this codebase treats as **terminal for writes**.
+#:
+#: ``superseded`` and ``parked`` are open questions with different reasoning
+#: (``parked`` has an active re-parenting workflow that writes to it;
+#: ``superseded`` has no ``resolved_by_msg`` and so no analogous R3 pairing) --
+#: see msg-406 §5.3. Naming exactly one status here rather than a set is
+#: deliberate: a set invites a later contributor to append to it without
+#: revisiting the reasoning either of those two would require.
+_WRITE_TERMINAL_STATUS = "resolved"
+
+
+def assert_thread_writable(thread: Thread) -> None:
+    """Refuse any write into a thread whose status is terminal for writes.
+
+    The pair this refuses is **a settled thread taking a new message**.
+    Enforced here rather than in ``compute_transition`` because the transition
+    computer answers "does this msg change status" -- a projection, not a
+    permission check -- and the permission we want holds for every ``type``,
+    not only ``decide``. Splitting the check by type (accept ``report``,
+    refuse ``decide``) reopens exactly the crack ``assert_next_participant_rule``
+    was written to close: two msgs recording the two halves of "settled AND
+    somebody still owes a turn", each individually legal.
+
+    The caller (``post_message_in_session``) must have taken the per-thread
+    row lock (``session.refresh(thread, with_for_update=True)``) before
+    calling this, so ``thread.status`` reflects the newest committed state.
+    Without that lock, a concurrent close can commit between this read and
+    the INSERT that follows, and this check would fire on a stale value --
+    the TOCTOU Einstein raised (msg-405). The choke-point layout in
+    ``post_message_in_session`` guarantees the ordering; no caller may run
+    this against an unlocked thread and stay correct.
+
+    Details include ``resolved_by_msg`` so a refused client (typically an
+    agent) receives a machine-readable pointer to where the decision was
+    recorded: "the settled thread is *this* msg, and if you want to continue
+    the topic, open a new thread and reference it" -- the same shape
+    ``references_threads`` already writes.
+
+    Raises:
+        ChatroomStateError: If ``thread.status`` is terminal for writes.
+            409 by exception mapping (see ``exceptions.py``).
+    """
+    if thread.status != _WRITE_TERMINAL_STATUS:
+        return
+    raise ChatroomStateError(
+        f"Thread '{thread.thread_id}' is resolved and cannot take new "
+        f"messages. To continue, open a new thread and reference this one "
+        f"via `references_threads`.",
+        details={
+            "thread_id": thread.thread_id,
+            "status": thread.status,
+            "resolved_by_msg": thread.resolved_by_msg,
+        },
+    )
 
 
 async def fetch_thread_or_raise(

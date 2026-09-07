@@ -160,6 +160,103 @@ async def test_summary_mode_on_active_thread_shows_full(client: AsyncClient) -> 
     assert len(body["messages"]) == 2  # propose + question (not yet resolved)
 
 
+async def test_summary_mode_returns_the_decide_on_a_resolved_thread(
+    client: AsyncClient,
+) -> None:
+    """The everyday path: resolved thread → summary is one msg (the decide).
+
+    Pins the R3 filter's ordinary output. The unusual-case tests below cover
+    the reason the filter is now ``msg_id == resolved_by_msg`` rather than
+    ``type == 'decide'``.
+    """
+    await _open_thread(client, "p", "T-1")
+    close = (await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={"summary_content": "done", "author": "alice"},
+    )).json()
+
+    r = await client.get("/v1/projects/p/threads/T-1?mode=summary")
+    body = r.json()
+    assert body["mode"] == "summary"
+    assert len(body["messages"]) == 1
+    assert body["messages"][0]["msg_id"] == close["decide_msg"]["msg_id"]
+    assert body["messages"][0]["type"] == "decide"
+
+
+async def test_summary_mode_returns_only_the_resolving_decide_not_stray_ones(
+    client: AsyncClient, db_session,
+) -> None:
+    """R3 pin (msg-406 §5.2): the summary filter selects the msg the thread
+    row itself points at, not "any decide".
+
+    ``messages`` is append-only, so a stray decide already sitting in a
+    resolved thread cannot be deleted; the write path can only stop new ones
+    (R2). This test seeds one such row directly and confirms the summary
+    still returns exactly one msg -- the one ``resolved_by_msg`` names.
+    Without R3 the summary would return two decides and the "summary is one
+    msg" contract mindwire's tools rely on would silently break.
+    """
+    from sqlalchemy import text as sql_text
+
+    await _open_thread(client, "p", "T-1")
+    close = (await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={"summary_content": "done", "author": "alice"},
+    )).json()
+    real_decide_id = close["decide_msg"]["msg_id"]
+
+    # Direct INSERT to simulate a stray decide that came in before R2 shipped
+    # (or through a write path that bypassed `post_message_in_session`, which
+    # is what the /integrity report exists to catch). The API refuses this
+    # today; the row can only appear via history or corruption. That is
+    # exactly the case R3 is here to handle.
+    await db_session.execute(
+        sql_text(
+            "INSERT INTO messages "
+            "(project, msg_id, thread_id, author, timestamp, type, content, "
+            " references_threads, related_tasks, tags) "
+            "VALUES ('p', 'msg-099', 'T-1', 'alice', now(), 'decide', "
+            " 'stray after resolve', '[]', '[]', '[]')"
+        )
+    )
+    await db_session.commit()
+
+    r = await client.get("/v1/projects/p/threads/T-1?mode=summary")
+    body = r.json()
+    assert len(body["messages"]) == 1
+    assert body["messages"][0]["msg_id"] == real_decide_id
+
+
+async def test_summary_mode_on_resolved_without_resolved_by_msg_is_empty(
+    client: AsyncClient, db_session,
+) -> None:
+    """R3 corollary: a resolved thread with NULL ``resolved_by_msg`` is an
+    ``inconsistent_resolved`` audit finding (a real bug, reported elsewhere).
+    The summary mode returns zero rows in that case rather than covering
+    the corruption with a lucky "any decide" guess: an empty summary is a
+    signal, a spurious match is a false calm.
+    """
+    from sqlalchemy import text as sql_text
+
+    await _open_thread(client, "p", "T-1")
+    await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={"summary_content": "done", "author": "alice"},
+    )
+    # Corrupt the row: resolved but no pointer. `audit_project` reports this
+    # as `inconsistent_resolved`; the R3 filter surfaces the corruption
+    # rather than papering over it with a stray match.
+    await db_session.execute(
+        sql_text("UPDATE threads SET resolved_by_msg = NULL WHERE thread_id = 'T-1'")
+    )
+    await db_session.commit()
+
+    r = await client.get("/v1/projects/p/threads/T-1?mode=summary")
+    body = r.json()
+    assert body["mode"] == "summary"
+    assert body["messages"] == []
+
+
 # ---- activity rollup (last_msg_id / msg_count / last_activity_at) ---------
 
 

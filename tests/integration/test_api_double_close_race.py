@@ -228,20 +228,25 @@ async def test_parallel_close_vs_handoff_close_first_leaves_thread_resolved(
     assert "inconsistent_resolved" not in types
 
 
-async def test_parallel_handoff_vs_close_close_first_leaves_thread_resolved(
+async def test_parallel_handoff_vs_close_close_first_refuses_the_handoff(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """First: handoff (paused). Second: close (runs first). Release handoff.
 
     Ordering seen: close wins and commits (active -> resolved). Handoff
-    then refreshes, reads resolved, and compute_transition returns
-    (None, {}) for handoff-on-resolved (existing behaviour, `status_transition`
-    table's "anything else" branch). The handoff msg is appended; the
-    thread stays resolved; nothing about `inconsistent_resolved` fires.
+    then refreshes, reads ``status='resolved'``, and
+    ``assert_thread_writable`` (msg-406 §5.1) refuses the write with
+    ``ChatroomStateError`` -> 409. This is the TOCTOU pin Einstein asked
+    for (msg-405): the handoff request's initial read saw ``active``, but
+    the read that decides is the one under the row lock, and it sees the
+    committed close.
 
-    This test pins the existing behaviour (未測定 3): non-close posts to a
-    resolved thread are accepted with no state change. Changing that is
-    outside this thread's scope.
+    This test **replaces** the earlier form of the same fixture, which
+    used to pin ``handoff appended, thread still resolved, no inconsistent
+    row`` -- the "未測定 3" behaviour Bohr's msg-348 §3 called out and
+    msg-406 §5.1 refused. The refusal target is *any* type, not only
+    ``decide``: refusing decide alone would leave open the two-msg
+    variant of invariant 7's paired state (msg-406 §2).
     """
     await _open(client, "T-1")
     barrier = _install_barrier(monkeypatch)
@@ -263,9 +268,16 @@ async def test_parallel_handoff_vs_close_close_first_leaves_thread_resolved(
     )
 
     assert resp_close.status_code == 201, resp_close.text
-    # Handoff succeeds but changes nothing (thread is already resolved).
-    assert resp_handoff.status_code == 201, resp_handoff.text
-    assert resp_handoff.json()["thread_status_changed_to"] is None
+    assert resp_handoff.status_code == 409, resp_handoff.text
+    body_handoff = resp_handoff.json()
+    assert body_handoff["error_type"] == "ChatroomStateError"
+    assert "resolved" in body_handoff["error"]
+    # Machine-readable pointer to where the decision was recorded, so the
+    # refused client (typically an agent) can open a new thread and
+    # reference this one instead of retrying blindly.
+    assert body_handoff["details"]["thread_id"] == "T-1"
+    assert body_handoff["details"]["status"] == "resolved"
+    assert body_handoff["details"]["resolved_by_msg"] is not None
 
     r = await client.get("/v1/projects/p/threads/T-1?mode=full")
     body = r.json()
@@ -273,6 +285,9 @@ async def test_parallel_handoff_vs_close_close_first_leaves_thread_resolved(
     closing = [m for m in body["messages"] if m.get("closes_thread")]
     assert len(closing) == 1
     assert body["thread"]["resolved_by_msg"] == closing[0]["msg_id"]
+    # The refused handoff wrote nothing. The propose + the close's decide
+    # are the only rows.
+    assert [m["type"] for m in body["messages"]] == ["propose", "decide"]
 
     audit = await client.get("/v1/projects/p/integrity")
     types = {i["type"] for i in audit.json()["issues"]}
