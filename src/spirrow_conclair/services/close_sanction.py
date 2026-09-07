@@ -33,7 +33,7 @@ of being guessed at:
 ===========================================  =============================
 condition                                    outcome
 ===========================================  =============================
-record present, kind in SANCTIONED_KINDS     ``sanctioned`` (counted only)
+record present, KIND_IS_SANCTIONED[kind]     ``sanctioned`` (counted only)
 record present, any other kind               ``unattributable``
                                              (``unclassified_override``)
 no record, msg at/after the cutover          ``corruption`` (a real issue)
@@ -71,7 +71,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, cast, get_args
+
+from spirrow_conclair.schemas.close_sanction_vocab import (
+    KIND_IS_SANCTIONED,
+    CloseSanctionKind,
+    UnattributableReason,
+)
+
+# Runtime shadow of `CloseSanctionKind`. `record.kind` comes off a JSON blob
+# and is typed `str | None`, so `KIND_IS_SANCTIONED[record.kind]` would need
+# a cast either way; going through this set lets the map's lookup stay total
+# (a missing key means the vocabulary drifted, and the KeyError says so at
+# the point of use) while still recognising arbitrary strings that arrived
+# on stale event rows as "unknown kind, unattributable".
+_KNOWN_KINDS: frozenset[str] = frozenset(get_args(CloseSanctionKind))
 
 # Key under a `chatroom_events.details` object. The event row's own `msg_id`
 # column carries the attribution -- the sanction speaks about one message, and
@@ -79,17 +93,23 @@ from typing import Any, Literal
 # message in it.
 CLOSE_SANCTION_KEY = "close_sanction"
 
-CloseSanctionKind = Literal["human_override", "pr_gate_ledger", "unspecified"]
-
-#: Kinds that make a non-owner close accounted for. `unspecified` is
-#: deliberately absent: it says a bypass happened and nothing about which.
-SANCTIONED_KINDS: tuple[str, ...] = ("human_override", "pr_gate_ledger")
-
 #: Recorded when a caller passes only the legacy `owner_override` boolean.
 UNSPECIFIED_SANCTION: dict[str, Any] = {"kind": "unspecified"}
 
 CloseVerdict = Literal["sanctioned", "unattributable", "corruption"]
-UnattributableReason = Literal["pre_recording", "unclassified_override"]
+
+# Re-exported so external readers keep a single import site.
+__all__ = [
+    "CLOSE_SANCTION_KEY",
+    "CloseClassification",
+    "CloseSanctionKind",
+    "CloseVerdict",
+    "SanctionRecord",
+    "UNSPECIFIED_SANCTION",
+    "UnattributableReason",
+    "classify_non_owner_close",
+    "read_sanction_record",
+]
 
 
 @dataclass(frozen=True)
@@ -163,8 +183,20 @@ def classify_non_owner_close(
             live", and inventing a boundary would fabricate findings.
     """
     if record is not None:
-        if record.kind in SANCTIONED_KINDS:
-            return CloseClassification(verdict="sanctioned", kind=record.kind)
+        # `record.kind` is what came off a stored JSON blob; wire-fresh values
+        # are always in `_KNOWN_KINDS`, but stale/malformed rows can carry
+        # arbitrary strings, and they belong in `unclassified_override`.
+        if record.kind is not None and record.kind in _KNOWN_KINDS:
+            # Total lookup. A `KeyError` here means someone added a token to
+            # `CloseSanctionKind` without extending `KIND_IS_SANCTIONED` --
+            # a programming error, not user input, so we do not swallow it
+            # with `.get(..., False)` (that would silently under-count).
+            # `test_kind_is_sanctioned_covers_every_kind` catches this in
+            # unit before it can reach production. Cast is safe because we
+            # just checked membership.
+            kind = cast(CloseSanctionKind, record.kind)
+            if KIND_IS_SANCTIONED[kind]:
+                return CloseClassification(verdict="sanctioned", kind=record.kind)
         return CloseClassification(
             verdict="unattributable",
             kind=record.kind,

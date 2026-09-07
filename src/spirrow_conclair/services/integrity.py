@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import BigInteger, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,7 +50,6 @@ from spirrow_conclair.services.close_sanction import (
     read_sanction_record,
 )
 from spirrow_conclair.services.msg_id_allocator import format_msg_id, parse_msg_id
-
 
 # ----- pre-write asserts -----
 
@@ -643,4 +642,4 @@ async def audit_project(
 
 def now_utc() -> datetime:
     """Helper: timezone-aware UTC `datetime` for `IntegrityCheckResponse.checked_at`."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
