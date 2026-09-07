@@ -42,8 +42,14 @@ They want opposite error directions, which is why they cannot be one
 cleverer check. Narrowing the scan to literal ``True`` would satisfy B and
 blind A -- a second site spelled ``with_for_update=some_flag`` would stop
 being counted and the total would stay at one. Widening it to satisfy A
-alone is what left the hole B now fills. The argument is msg-482 §3; the
-last row of the measured matrix below is what keeps it honest.
+alone is what left the hole B now fills. The argument is msg-482 §3.
+
+That it worked out that way was measured, not reasoned: before shipping,
+each value form below was substituted into the real call site and each
+turned B red while A stayed green, and a second site spelled
+``with_for_update=some_flag`` in a new file turned A red -- which is how
+we know adding B did not blind A. The full matrix is in the message of
+the commit that added this test.
 
 What is pinned, and what is merely assumed
 ------------------------------------------
