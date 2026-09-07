@@ -334,12 +334,26 @@ async def get_thread(
         .where(Message.project == project, Message.thread_id == thread_id)
         .order_by(msg_num_expr())
     )
-    # `summary` view on a resolved thread returns only the decide msg.
-    # Active / awaiting_reply / superseded / parked threads always show
-    # the full message list; the spec's "archive concept" is realised
-    # purely through this filter.
+    # `summary` view on a resolved thread returns the msg that actually
+    # closed it. Active / awaiting_reply / superseded / parked threads
+    # always show the full message list; the spec's "archive concept"
+    # is realised purely through this filter.
+    #
+    # The filter is `msg_id == thread.resolved_by_msg`, not
+    # `type == "decide"`. `messages` is append-only, so any decide row
+    # written into a resolved thread before `assert_thread_writable`
+    # shipped stays there forever -- filtering on type alone would
+    # surface those alongside the real close, and the "summary is one
+    # msg" affordance the tool docstring sells would silently break
+    # (this is what T-conclair-accepts-decide-onto-resolved-thread
+    # msg-348 caught). Filtering on the thread row's own record of which
+    # decide closed it makes the summary return exactly one msg when the
+    # schema is consistent, and zero when it is not (the
+    # `inconsistent_resolved` audit finding -- already reported, and not
+    # papered over here). Both are honest; a spurious-second-decide
+    # result is not.
     if mode == "summary" and thread.status == "resolved":
-        msg_query = msg_query.where(Message.type == "decide")
+        msg_query = msg_query.where(Message.msg_id == thread.resolved_by_msg)
 
     msg_rows = (await session.execute(msg_query)).scalars().all()
 

@@ -101,6 +101,25 @@ def test_decide_closes_open_thread_to_resolved(status: str) -> None:
 
 @pytest.mark.parametrize("status", _CLOSED)
 def test_decide_closes_closed_thread_raises_state_error(status: str) -> None:
+    """Pure-function contract: closing a non-open thread raises regardless
+    of whether the caller is the API write path.
+
+    This is not a test of dead code. R2 (msg-406 §5.1) refuses only
+    ``resolved`` -- ``_WRITE_TERMINAL_STATUS`` is a single value, pinned
+    by ``test_integrity.py::test_writable_when_thread_is_non_resolved_terminal``
+    -- so a ``decide`` + ``closes_thread`` posted by the thread owner
+    against a ``parked`` / ``superseded`` row passes
+    ``assert_thread_writable`` and lands on this branch. Whether such rows
+    exist is a data question (no endpoint creates those statuses today),
+    but the path is open, and this raise is the only thing refusing it:
+    without it the closing msg is recorded, the thread stays ``parked``
+    with no ``resolved_by_msg``, and no ``/integrity`` check looks for
+    that combination. The branch also fires when ``compute_transition``
+    is called directly (unit tests, future services, a repair script),
+    which is the contract this test states. See the comment on the raise
+    itself in ``services/status_transition.py``. Bohr msg-409 §3,
+    reachability corrected in msg-466 §2.
+    """
     thread = _mk_thread(status, thread_id="T-1")
     msg = _mk_msg("decide", closes_thread="T-1")
     with pytest.raises(ChatroomStateError) as ei:

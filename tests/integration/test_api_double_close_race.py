@@ -228,20 +228,32 @@ async def test_parallel_close_vs_handoff_close_first_leaves_thread_resolved(
     assert "inconsistent_resolved" not in types
 
 
-async def test_parallel_handoff_vs_close_close_first_leaves_thread_resolved(
+async def test_parallel_handoff_vs_close_close_first_refuses_the_handoff(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """First: handoff (paused). Second: close (runs first). Release handoff.
 
     Ordering seen: close wins and commits (active -> resolved). Handoff
-    then refreshes, reads resolved, and compute_transition returns
-    (None, {}) for handoff-on-resolved (existing behaviour, `status_transition`
-    table's "anything else" branch). The handoff msg is appended; the
-    thread stays resolved; nothing about `inconsistent_resolved` fires.
+    then refreshes, reads ``status='resolved'``, and
+    ``assert_thread_writable`` (msg-406 §5.1) refuses the write with
+    ``ChatroomStateError`` -> 409. It exercises the behaviour Einstein's
+    TOCTOU objection asked for (msg-405) -- the handoff's initial read saw
+    ``active`` and the read that decides sees the committed close -- but it
+    does not discriminate on how that later read was taken.
 
-    This test pins the existing behaviour (未測定 3): non-close posts to a
-    resolved thread are accepted with no state change. Changing that is
-    outside this thread's scope.
+    What this pins is the refusal, not the lock. Measured (see the block
+    further down this file): with ``with_for_update=True`` deleted, this test
+    passed 5 times out of 5, because the barrier releases only after the close
+    has committed and READ COMMITTED then hands the refresh the committed
+    value with or without a lock. Do not cite this test as evidence that the
+    row lock is defended against regression.
+
+    This test **replaces** the earlier form of the same fixture, which
+    used to pin ``handoff appended, thread still resolved, no inconsistent
+    row`` -- the "未測定 3" behaviour Bohr's msg-348 §3 called out and
+    msg-406 §5.1 refused. The refusal target is *any* type, not only
+    ``decide``: refusing decide alone would leave open the two-msg
+    variant of invariant 7's paired state (msg-406 §2).
     """
     await _open(client, "T-1")
     barrier = _install_barrier(monkeypatch)
@@ -263,9 +275,16 @@ async def test_parallel_handoff_vs_close_close_first_leaves_thread_resolved(
     )
 
     assert resp_close.status_code == 201, resp_close.text
-    # Handoff succeeds but changes nothing (thread is already resolved).
-    assert resp_handoff.status_code == 201, resp_handoff.text
-    assert resp_handoff.json()["thread_status_changed_to"] is None
+    assert resp_handoff.status_code == 409, resp_handoff.text
+    body_handoff = resp_handoff.json()
+    assert body_handoff["error_type"] == "ChatroomStateError"
+    assert "resolved" in body_handoff["error"]
+    # Machine-readable pointer to where the decision was recorded, so the
+    # refused client (typically an agent) can open a new thread and
+    # reference this one instead of retrying blindly.
+    assert body_handoff["details"]["thread_id"] == "T-1"
+    assert body_handoff["details"]["status"] == "resolved"
+    assert body_handoff["details"]["resolved_by_msg"] is not None
 
     r = await client.get("/v1/projects/p/threads/T-1?mode=full")
     body = r.json()
@@ -273,6 +292,9 @@ async def test_parallel_handoff_vs_close_close_first_leaves_thread_resolved(
     closing = [m for m in body["messages"] if m.get("closes_thread")]
     assert len(closing) == 1
     assert body["thread"]["resolved_by_msg"] == closing[0]["msg_id"]
+    # The refused handoff wrote nothing. The propose + the close's decide
+    # are the only rows.
+    assert [m["type"] for m in body["messages"]] == ["propose", "decide"]
 
     audit = await client.get("/v1/projects/p/integrity")
     types = {i["type"] for i in audit.json()["issues"]}
@@ -347,6 +369,137 @@ async def test_row_lock_on_one_thread_does_not_block_writes_to_another(
     resp_a = await client.post(
         "/v1/projects/p/threads/T-A/messages",
         json={"type": "report", "author": "alice", "content": "a"},
+    )
+    assert resp_a.status_code == 201, resp_a.text
+
+
+# ---------------------------------------------------------------------------
+# What this test pins, and what it does NOT (Bohr msg-409 §2.2, measured).
+#
+# MEASURED, not argued. `with_for_update=True` was deleted from
+# `post_message_in_session` on a throwaway branch and the whole integration
+# suite was run in CI with both candidate pins repeated five times each:
+#
+#     250 passed, 2 deselected -- every test green with the lock removed
+#     test_parallel_handoff_vs_close_..._refuses_the_handoff:  0 of 5 failed
+#     test_row_lock_serialises_two_writes_on_the_same_thread:  0 of 5 failed
+#
+# So NEITHER test discriminates on the row lock. Two different mechanisms
+# are responsible, and both are worth knowing:
+#
+#   - The barrier tests above pause BEFORE the refresh (they must, or a
+#     paused task holds the row and the single-threaded runner livelocks --
+#     see the module docstring). By the time the paused task refreshes, the
+#     other request has committed, and at READ COMMITTED that refresh reads
+#     the committed value whether or not it locks. They pin the state
+#     machine (`assert_thread_writable` + the transition table), not the lock.
+#
+#   - THIS test blocks with the lock removed too, because every message
+#     write assigns `thread.last_msg_num` and the resulting UPDATE takes the
+#     same row lock at flush time. The queueing it observes is real, but it
+#     is not evidence that the *refresh* locks.
+#
+# What this test therefore pins is the observable acceptance property: a
+# write to a thread whose row is held by another transaction QUEUES rather
+# than proceeding on stale state. Paired with
+# `test_row_lock_on_one_thread_does_not_block_writes_to_another`, which
+# pins that the lock is per-ROW and not table-wide, the two describe the
+# shape of the serialisation the fix delivers.
+#
+# The property still NOT pinned by any test is the one the lock exists for:
+# that the status read which DECIDES is taken under the lock, so a close
+# committing between the read and the write cannot be missed. Catching that
+# needs a seam placed AFTER the refresh with a time-driven release (a
+# release driven by the other task's completion would deadlock, which is
+# why the barrier sits where it does). That is an open design question for
+# the proposer, not something to bolt on here.
+# ---------------------------------------------------------------------------
+
+
+async def test_row_lock_serialises_two_writes_on_the_same_thread(
+    client: AsyncClient,
+    session_factory,  # type: ignore[no-untyped-def]
+) -> None:
+    """A held ``SELECT ... FOR UPDATE`` on T-A's row makes a concurrent write
+    to T-A queue instead of proceeding. Mirror of the sibling-thread test
+    above: that one pins the lock's SCOPE (per row, not table-wide), this one
+    pins that same-row writes SERIALISE.
+
+    Read the block above this test before treating it as a pin on
+    ``with_for_update``: it is not one, and that was measured, not assumed.
+
+    Sequence:
+    1. Open T-A.
+    2. Open a raw session, ``BEGIN``, ``SELECT ... FOR UPDATE`` on T-A's
+       row. Do not commit yet.
+    3. Fire an HTTP write to T-A. It must queue behind the raw session's
+       lock -- which is held.
+    4. ``asyncio.wait_for`` times out because the write is blocked.
+    5. On timeout, we cancel the pending write task, release the raw
+       session (rollback), and confirm a subsequent write to T-A
+       completes fast (sanity: the lock really did release).
+
+    Failing verdict: the HTTP write completes before the timeout, meaning a
+    writer no longer queues behind a held lock on the row it is about to
+    modify. Note the weakness of a timeout as an oracle -- a loaded runner
+    can make a write slow for unrelated reasons and turn this green for the
+    wrong reason. Step 5 bounds that: the same write must complete inside
+    five seconds once the lock is released.
+
+    Note on cancellation: ``asyncio.wait_for`` cancels the wrapped task
+    on timeout, which is enough because ``httpx.AsyncClient`` releases
+    its connection and the ASGI request coroutine is aborted. The raw
+    session's lock releases at scope exit.
+    """
+    from sqlalchemy import text
+
+    await _open(client, "T-A")
+
+    async with session_factory() as blocker:
+        async with blocker.begin():
+            row = (
+                await blocker.execute(
+                    text(
+                        "SELECT thread_id FROM threads "
+                        "WHERE project = :p AND thread_id = :t FOR UPDATE"
+                    ),
+                    {"p": "p", "t": "T-A"},
+                )
+            ).scalar_one()
+            assert row == "T-A"
+
+            # Write to T-A must block on the raw session's lock. Timeout
+            # short enough to fail the test if the lock is not doing its
+            # job (a regression would answer in milliseconds), long enough
+            # that the "did it queue?" signal is unambiguous on slow CI.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    client.post(
+                        "/v1/projects/p/threads/T-A/messages",
+                        json={
+                            "type": "report",
+                            "author": "alice",
+                            "content": "queued",
+                        },
+                    ),
+                    timeout=2.0,
+                )
+        # The blocker releases the T-A lock here, by COMMIT. The inner
+        # ``pytest.raises`` consumed the TimeoutError, so no exception
+        # propagates out of the ``async with blocker.begin()`` scope, and
+        # SQLAlchemy commits a transaction that exits normally. The
+        # blocker only ever ran ``SELECT ... FOR UPDATE``, so that commit
+        # writes nothing and its whole effect is dropping the row lock. A
+        # rollback would drop it just as well -- the correction is only
+        # that a rollback is not what happens.
+
+    # Sanity: the lock really did release; a subsequent T-A write is fast.
+    resp_a = await asyncio.wait_for(
+        client.post(
+            "/v1/projects/p/threads/T-A/messages",
+            json={"type": "report", "author": "alice", "content": "after"},
+        ),
+        timeout=5.0,
     )
     assert resp_a.status_code == 201, resp_a.text
 

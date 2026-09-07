@@ -120,6 +120,15 @@ async def post_message_in_session(
     # lock time, and this design would need to be revisited.
     await session.refresh(thread, with_for_update=True)
 
+    # Refuse writes into a resolved thread. Runs immediately after the
+    # refresh -- and only after -- so `thread.status` reflects the newest
+    # committed state and a concurrent close cannot slip past this check
+    # (msg-405 TOCTOU). Kept in front of every other assert because those
+    # touch the DB (`assert_propose_invariant`, `assert_reply_to_in_thread`,
+    # `assert_references_threads_exist`) and this one answers a question
+    # they should not even be asked when the thread is terminal.
+    integrity_svc.assert_thread_writable(thread)
+
     # Pre-write asserts (each raises ChatroomIntegrityError on violation).
     await integrity_svc.assert_propose_invariant(
         session,
