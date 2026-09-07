@@ -8,7 +8,7 @@ GET  /v1/projects/{project}/threads/{id} — get_thread (mode=full|summary,
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Path, Query, status
@@ -21,15 +21,17 @@ from spirrow_conclair.models import ChatroomEvent, Message, Thread
 from spirrow_conclair.schemas import (
     CloseThreadRequest,
     CloseThreadResponse,
-    Message as MessageSchema,
-)
-from spirrow_conclair.schemas import (
     OpenThreadRequest,
     OpenThreadResponse,
-    Thread as ThreadSchema,
     ThreadListResponse,
     ThreadStatus,
     ThreadView,
+)
+from spirrow_conclair.schemas import (
+    Message as MessageSchema,
+)
+from spirrow_conclair.schemas import (
+    Thread as ThreadSchema,
 )
 from spirrow_conclair.services import integrity as integrity_svc
 from spirrow_conclair.services.digest import fetch_digest_response
@@ -84,7 +86,7 @@ async def open_thread(
     body: OpenThreadRequest,
     session: SessionDep,
 ) -> OpenThreadResponse:
-    timestamp = body.timestamp or datetime.now(timezone.utc)
+    timestamp = body.timestamp or datetime.now(UTC)
 
     async with session.begin():
         # Reject if a thread with the same id already exists in this project.
@@ -394,16 +396,29 @@ async def close_thread(
         thread = await integrity_svc.fetch_thread_or_raise(
             session, project=project, thread_id=thread_id
         )
-        # Owner check first so non-owner attempts surface as 403 rather
-        # than as the integrity 409 from assert_closes_thread_rule.
-        # ADR-2026-06-04-19 D-5: owner_override (human Tier-C force-close,
+        # Two-layer ownership check, deliberately. This caller-level
+        # ``assert_owner_can_close`` runs on the pre-lock, stale ``thread``
+        # read from ``fetch_thread_or_raise`` and exists **for the 403 UX**:
+        # a plain non-owner attempt should surface as a permission error,
+        # not the ``ChatroomIntegrityError`` (409) that would otherwise come
+        # back from ``assert_closes_thread_rule`` under the lock.
+        #
+        # The **load-bearing** ownership check is
+        # ``assert_closes_thread_rule`` inside ``post_message_in_session``,
+        # which runs *after* ``session.refresh(thread, with_for_update=True)``
+        # on the freshly locked row. A stale caller-level pass followed by a
+        # concurrent ``thread.owner`` mutation is therefore rejected by the
+        # under-lock check with 409 -- see
+        # ``test_owner_change_between_caller_check_and_refresh_is_rejected``
+        # for the TOCTOU pin (``tests/integration/test_api_double_close_race.py``).
+        # Owner has no API-surface mutation today (grep: written only in
+        # ``open_thread``), so the two-layer check is defense-in-depth
+        # against a future feature; the correctness of *this* PR does not
+        # depend on such a feature existing.
+        #
+        # ADR-2026-06-04-19 D-5: ``owner_override`` (human Tier-C force-close,
         # gated by Magickit) skips the ownership clause only.
         assert_owner_can_close(thread, body.author, owner_override=body.owner_override)
-
-        # affects_threads is a thread-level field; patch it before
-        # post_message_in_session so it's persisted in the same txn.
-        if body.affects_threads:
-            thread.affects_threads = list(body.affects_threads)
 
         msg_orm, _transition = await post_message_in_session(
             session,
@@ -430,6 +445,34 @@ async def close_thread(
             owner_override_reason=body.owner_override_reason,
             close_sanction=body.close_sanction,
         )
+        # affects_threads is a thread-level field patched *after*
+        # post_message_in_session, not before. The row-lock refresh inside
+        # that call reloads every column from the DB, so a pre-call
+        # assignment would be silently discarded (SQLAlchemy's refresh
+        # overwrites pending attribute changes on the reloaded instance).
+        # Assigning after the refresh keeps the change in the same txn --
+        # the outer ``session.begin()`` flushes it on commit alongside the
+        # msg row and status transition -- and preserves the semantics the
+        # ``test_owner_can_close`` assertion pins.
+        #
+        # Unconditional assignment, deliberately. ``body.affects_threads``
+        # is ``list[str] = Field(default_factory=list)`` on the schema
+        # (see ``CloseThreadRequest``), so Pydantic makes it always a
+        # list -- never ``None`` -- and an omitted field is
+        # indistinguishable from an explicit ``[]``. The previous ``if
+        # body.affects_threads:`` guard therefore only *looked* like it
+        # preserved an old non-empty value on an empty request; there is
+        # no reachable state where that matters. ``open_thread``
+        # initialises the column to ``[]`` and this is the only route
+        # that writes it, so a caller who sends ``[]`` is either
+        # explicitly clearing (from ``[]`` to ``[]`` -- no-op) or leaving
+        # it alone (still ``[]``). The unconditional form removes a
+        # false-optimisation conditional that implied a nullable schema
+        # this repo does not have. A future ``list[str] | None`` schema
+        # that carried "no change" semantics would need an ``is not
+        # None`` gate here **and** a schema change; today, neither
+        # exists.
+        thread.affects_threads = list(body.affects_threads)
         # Inside the txn, after post_message_in_session flushed the decide
         # msg -- so the count includes the msg this call just wrote.
         rollup = await fetch_thread_rollup(
