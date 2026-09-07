@@ -484,11 +484,14 @@ async def test_row_lock_serialises_two_writes_on_the_same_thread(
                     ),
                     timeout=2.0,
                 )
-        # blocker rolls back and releases the T-A lock here (no commit
-        # because the ``begin()`` scope is exiting via exception -- the
-        # inner ``pytest.raises`` catches the TimeoutError, so control
-        # exits ``blocker.begin()`` normally; the row lock is released
-        # at commit time in either case).
+        # The blocker releases the T-A lock here, by COMMIT. The inner
+        # ``pytest.raises`` consumed the TimeoutError, so no exception
+        # propagates out of the ``async with blocker.begin()`` scope, and
+        # SQLAlchemy commits a transaction that exits normally. The
+        # blocker only ever ran ``SELECT ... FOR UPDATE``, so that commit
+        # writes nothing and its whole effect is dropping the row lock. A
+        # rollback would drop it just as well -- the correction is only
+        # that a rollback is not what happens.
 
     # Sanity: the lock really did release; a subsequent T-A write is fast.
     resp_a = await asyncio.wait_for(
