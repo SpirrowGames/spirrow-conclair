@@ -280,50 +280,75 @@ async def test_parallel_handoff_vs_close_close_first_leaves_thread_resolved(
 
 
 # ---------------------------------------------------------------------------
-# 受入 4: sibling threads must not serialise on each other. The row lock
-# is per-thread, so a paused write on T-A must not block a write on T-B.
-# The advisory (project) lock already existed and serialises the allocator;
-# this fix must not widen that.
+# 受入 4: sibling threads must not serialise on each other. A held FOR
+# UPDATE lock on T-A's row must not block a write on T-B. If the lock
+# had been on the ``threads`` table as a whole (LOCK TABLE), or on a
+# broader partition than the row PK, the T-B write would block until
+# the T-A lock is released.
+#
+# Using the barrier fixture above would *not* prove this: the barrier
+# pauses the first entrant *before* the refresh call, so the paused
+# task holds no DB lock at all, and the second task sails through
+# regardless of what the fix's lock scope is. Even a hypothetical
+# table-wide LOCK TABLE would pass a barrier-before-refresh test,
+# because the barrier's paused task has not yet reached the LOCK
+# statement. So this test opens a raw session and takes the same
+# per-row FOR UPDATE the fix takes, held for the duration of the T-B
+# request; that is the setup a scope regression could actually fail
+# under. ``asyncio.wait_for`` distinguishes "T-B completed" from "T-B
+# blocked waiting on T-A's lock" -- a per-row fix completes in
+# milliseconds; a per-table lock would keep T-B waiting until the
+# outer session releases at commit.
 # ---------------------------------------------------------------------------
 
 
-async def test_parallel_writes_on_different_threads_do_not_serialise(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+async def test_row_lock_on_one_thread_does_not_block_writes_to_another(
+    client: AsyncClient,
+    session_factory,  # type: ignore[no-untyped-def]
 ) -> None:
-    """Two threads, one is paused inside the barrier. A write on the other
-    thread must still be able to enter post_message_in_session, take its
-    own row lock (a different row), and commit -- proving the added lock
-    is per-thread, not per-project.
+    from sqlalchemy import text
 
-    ``entry_count`` on the barrier gates only the *first* entrant; the
-    second call sails through. If the added row lock had been on the
-    threads table as a whole, this test would time out (second call would
-    wait on the paused task's lock).
-    """
     await _open(client, "T-A")
     await _open(client, "T-B")
-    barrier = _install_barrier(monkeypatch)
 
-    async def write_a() -> Response:
-        return await client.post(
-            "/v1/projects/p/threads/T-A/messages",
-            json={"type": "report", "author": "alice", "content": "a"},
-        )
+    async with session_factory() as blocker:
+        async with blocker.begin():
+            # Take the same lock the production fix takes, on T-A's row.
+            # A ``SELECT ... FOR UPDATE`` here holds until the enclosing
+            # ``begin()`` block commits, which we do at scope exit.
+            row = (
+                await blocker.execute(
+                    text(
+                        "SELECT thread_id FROM threads "
+                        "WHERE project = :p AND thread_id = :t FOR UPDATE"
+                    ),
+                    {"p": "p", "t": "T-A"},
+                )
+            ).scalar_one()
+            assert row == "T-A"
 
-    async def write_b() -> Response:
-        return await client.post(
-            "/v1/projects/p/threads/T-B/messages",
-            json={"type": "report", "author": "alice", "content": "b"},
-        )
+            # Meanwhile, a write on T-B must complete without waiting on
+            # the T-A row lock. Timeout is generous enough that a slow CI
+            # runner does not false-positive (a per-row fix answers in
+            # milliseconds), but short enough that a scope regression
+            # surfaces as a test failure rather than a hung suite.
+            resp_b = await asyncio.wait_for(
+                client.post(
+                    "/v1/projects/p/threads/T-B/messages",
+                    json={"type": "report", "author": "alice", "content": "b"},
+                ),
+                timeout=5.0,
+            )
+            assert resp_b.status_code == 201, resp_b.text
+        # blocker commits and releases the T-A lock here.
 
-    # First pauses on the barrier; second must complete without waiting on
-    # the first's row lock (the row is a different one).
-    resp_a, resp_b = await _run_interleaved(
-        barrier, first=write_a, second=write_b
+    # Sanity: a subsequent T-A write is not stuck (i.e. the blocker's lock
+    # really did release, and no ambient state was left behind).
+    resp_a = await client.post(
+        "/v1/projects/p/threads/T-A/messages",
+        json={"type": "report", "author": "alice", "content": "a"},
     )
-
     assert resp_a.status_code == 201, resp_a.text
-    assert resp_b.status_code == 201, resp_b.text
 
 
 # ---------------------------------------------------------------------------
