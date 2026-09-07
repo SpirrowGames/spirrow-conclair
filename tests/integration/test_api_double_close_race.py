@@ -403,7 +403,7 @@ async def test_row_lock_on_one_thread_does_not_block_writes_to_another(
 async def test_row_lock_serialises_two_writes_on_the_same_thread(
     client: AsyncClient,
     session_factory,  # type: ignore[no-untyped-def]
-    _run: int = 0,
+    _run: int,
 ) -> None:
     """A held ``SELECT ... FOR UPDATE`` on T-A's row blocks a concurrent
     write to T-A. Mirror of the sibling-thread test above; together the
