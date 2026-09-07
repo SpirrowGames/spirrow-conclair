@@ -118,7 +118,7 @@ async def post_message_in_session(
     # SERIALIZABLE the refresh would either read the same snapshot
     # (defeating the fix) or raise a 40001 serialization failure at
     # lock time, and this design would need to be revisited.
-    await session.refresh(thread, with_for_update=True)
+    await session.refresh(thread)  # PROBE: row lock removed on purpose
 
     # Refuse writes into a resolved thread. Runs immediately after the
     # refresh -- and only after -- so `thread.status` reflects the newest
