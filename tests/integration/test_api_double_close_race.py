@@ -236,10 +236,17 @@ async def test_parallel_handoff_vs_close_close_first_refuses_the_handoff(
     Ordering seen: close wins and commits (active -> resolved). Handoff
     then refreshes, reads ``status='resolved'``, and
     ``assert_thread_writable`` (msg-406 §5.1) refuses the write with
-    ``ChatroomStateError`` -> 409. This is the TOCTOU pin Einstein asked
-    for (msg-405): the handoff request's initial read saw ``active``, but
-    the read that decides is the one under the row lock, and it sees the
-    committed close.
+    ``ChatroomStateError`` -> 409. It exercises the behaviour Einstein's
+    TOCTOU objection asked for (msg-405) -- the handoff's initial read saw
+    ``active`` and the read that decides sees the committed close -- but it
+    does not discriminate on how that later read was taken.
+
+    What this pins is the refusal, not the lock. Measured (see the block
+    further down this file): with ``with_for_update=True`` deleted, this test
+    passed 5 times out of 5, because the barrier releases only after the close
+    has committed and READ COMMITTED then hands the refresh the committed
+    value with or without a lock. Do not cite this test as evidence that the
+    row lock is defended against regression.
 
     This test **replaces** the earlier form of the same fixture, which
     used to pin ``handoff appended, thread still resolved, no inconsistent
@@ -367,34 +374,45 @@ async def test_row_lock_on_one_thread_does_not_block_writes_to_another(
 
 
 # ---------------------------------------------------------------------------
-# Bohr msg-409 §2.2 discrimination pin: the barrier-based tests above do
-# NOT discriminate for the row lock. At READ COMMITTED with the barrier
-# placed BEFORE the refresh (which it must be, or the runner deadlocks
-# per the module docstring), task-A pauses without holding a lock,
-# task-B refreshes and commits, and task-A's post-release refresh reads
-# task-B's committed state via READ COMMITTED whether or not that
-# refresh acquires a lock. So the state-machine outcome is the same
-# with and without ``with_for_update=True``, and those tests pin
-# state-machine correctness (``assert_thread_writable`` + the transition
-# table), not the lock's serialization value.
+# What this test pins, and what it does NOT (Bohr msg-409 §2.2, measured).
 #
-# The lock's serialization value is what this test pins: hold a
-# ``SELECT ... FOR UPDATE`` on T-A's row from a raw session, then issue
-# a write to T-A via the API and confirm the API request blocks (times
-# out under ``asyncio.wait_for``). Together with
-# ``test_row_lock_on_one_thread_does_not_block_writes_to_another``, this
-# pins the two orthogonal properties of the fix:
+# MEASURED, not argued. `with_for_update=True` was deleted from
+# `post_message_in_session` on a throwaway branch and the whole integration
+# suite was run in CI with both candidate pins repeated five times each:
 #
-#     - lock is per-ROW (sibling-thread test above completes fast)
-#     - lock SERIALISES on that row (this test blocks and times out)
+#     250 passed, 2 deselected -- every test green with the lock removed
+#     test_parallel_handoff_vs_close_..._refuses_the_handoff:  0 of 5 failed
+#     test_row_lock_serialises_two_writes_on_the_same_thread:  0 of 5 failed
 #
-# Bohr's original ask was a repeated experiment ("N of M times remove
-# the kwarg and re-run the barrier test") reported to the thread. That
-# form was chosen when we still believed the barrier test discriminated;
-# the analysis in msg-455's context showed it does not, so a repeated
-# ad-hoc measurement would report 0/N and teach us nothing. This test
-# is the standing pin for the property Bohr wanted evidence of, and it
-# runs on every CI push.
+# So NEITHER test discriminates on the row lock. Two different mechanisms
+# are responsible, and both are worth knowing:
+#
+#   - The barrier tests above pause BEFORE the refresh (they must, or a
+#     paused task holds the row and the single-threaded runner livelocks --
+#     see the module docstring). By the time the paused task refreshes, the
+#     other request has committed, and at READ COMMITTED that refresh reads
+#     the committed value whether or not it locks. They pin the state
+#     machine (`assert_thread_writable` + the transition table), not the lock.
+#
+#   - THIS test blocks with the lock removed too, because every message
+#     write assigns `thread.last_msg_num` and the resulting UPDATE takes the
+#     same row lock at flush time. The queueing it observes is real, but it
+#     is not evidence that the *refresh* locks.
+#
+# What this test therefore pins is the observable acceptance property: a
+# write to a thread whose row is held by another transaction QUEUES rather
+# than proceeding on stale state. Paired with
+# `test_row_lock_on_one_thread_does_not_block_writes_to_another`, which
+# pins that the lock is per-ROW and not table-wide, the two describe the
+# shape of the serialisation the fix delivers.
+#
+# The property still NOT pinned by any test is the one the lock exists for:
+# that the status read which DECIDES is taken under the lock, so a close
+# committing between the read and the write cannot be missed. Catching that
+# needs a seam placed AFTER the refresh with a time-driven release (a
+# release driven by the other task's completion would deadlock, which is
+# why the barrier sits where it does). That is an open design question for
+# the proposer, not something to bolt on here.
 # ---------------------------------------------------------------------------
 
 
@@ -402,27 +420,31 @@ async def test_row_lock_serialises_two_writes_on_the_same_thread(
     client: AsyncClient,
     session_factory,  # type: ignore[no-untyped-def]
 ) -> None:
-    """A held ``SELECT ... FOR UPDATE`` on T-A's row blocks a concurrent
-    write to T-A. Mirror of the sibling-thread test above; together the
-    two pin lock scope AND lock serialization.
+    """A held ``SELECT ... FOR UPDATE`` on T-A's row makes a concurrent write
+    to T-A queue instead of proceeding. Mirror of the sibling-thread test
+    above: that one pins the lock's SCOPE (per row, not table-wide), this one
+    pins that same-row writes SERIALISE.
+
+    Read the block above this test before treating it as a pin on
+    ``with_for_update``: it is not one, and that was measured, not assumed.
 
     Sequence:
     1. Open T-A.
     2. Open a raw session, ``BEGIN``, ``SELECT ... FOR UPDATE`` on T-A's
        row. Do not commit yet.
-    3. Fire an HTTP write to T-A. The write's ``session.refresh(...,
-       with_for_update=True)`` inside ``post_message_in_session`` must
-       queue behind the raw session's lock -- which is held.
+    3. Fire an HTTP write to T-A. It must queue behind the raw session's
+       lock -- which is held.
     4. ``asyncio.wait_for`` times out because the write is blocked.
     5. On timeout, we cancel the pending write task, release the raw
        session (rollback), and confirm a subsequent write to T-A
        completes fast (sanity: the lock really did release).
 
-    Failing verdict (regression -- the production ``refresh`` is no
-    longer a locking one): the HTTP write completes before the timeout
-    because ``refresh`` did not queue. That is exactly the failure mode
-    Bohr msg-409 §2.2 wanted evidence of, and this test would flip red
-    on that regression on every CI push.
+    Failing verdict: the HTTP write completes before the timeout, meaning a
+    writer no longer queues behind a held lock on the row it is about to
+    modify. Note the weakness of a timeout as an oracle -- a loaded runner
+    can make a write slow for unrelated reasons and turn this green for the
+    wrong reason. Step 5 bounds that: the same write must complete inside
+    five seconds once the lock is released.
 
     Note on cancellation: ``asyncio.wait_for`` cancels the wrapped task
     on timeout, which is enough because ``httpx.AsyncClient`` releases
