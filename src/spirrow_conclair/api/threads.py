@@ -396,9 +396,27 @@ async def close_thread(
         thread = await integrity_svc.fetch_thread_or_raise(
             session, project=project, thread_id=thread_id
         )
-        # Owner check first so non-owner attempts surface as 403 rather
-        # than as the integrity 409 from assert_closes_thread_rule.
-        # ADR-2026-06-04-19 D-5: owner_override (human Tier-C force-close,
+        # Two-layer ownership check, deliberately. This caller-level
+        # ``assert_owner_can_close`` runs on the pre-lock, stale ``thread``
+        # read from ``fetch_thread_or_raise`` and exists **for the 403 UX**:
+        # a plain non-owner attempt should surface as a permission error,
+        # not the ``ChatroomIntegrityError`` (409) that would otherwise come
+        # back from ``assert_closes_thread_rule`` under the lock.
+        #
+        # The **load-bearing** ownership check is
+        # ``assert_closes_thread_rule`` inside ``post_message_in_session``,
+        # which runs *after* ``session.refresh(thread, with_for_update=True)``
+        # on the freshly locked row. A stale caller-level pass followed by a
+        # concurrent ``thread.owner`` mutation is therefore rejected by the
+        # under-lock check with 409 -- see
+        # ``test_owner_change_between_caller_check_and_refresh_is_rejected``
+        # for the TOCTOU pin (``tests/integration/test_api_double_close_race.py``).
+        # Owner has no API-surface mutation today (grep: written only in
+        # ``open_thread``), so the two-layer check is defense-in-depth
+        # against a future feature; the correctness of *this* PR does not
+        # depend on such a feature existing.
+        #
+        # ADR-2026-06-04-19 D-5: ``owner_override`` (human Tier-C force-close,
         # gated by Magickit) skips the ownership clause only.
         assert_owner_can_close(thread, body.author, owner_override=body.owner_override)
 

@@ -352,6 +352,107 @@ async def test_row_lock_on_one_thread_does_not_block_writes_to_another(
 
 
 # ---------------------------------------------------------------------------
+# TOCTOU defense: the caller-level ``assert_owner_can_close`` in the
+# ``/close`` route runs on the stale, unlocked ``thread`` read, so a
+# concurrent ownership mutation between that check and the row-lock
+# refresh could otherwise slip through the caller-level gate. The
+# invariant that a non-owner cannot close is not enforced only by the
+# early 403 gate; ``assert_closes_thread_rule`` runs again inside
+# ``post_message_in_session`` *after* the ``session.refresh(...,
+# with_for_update=True)``, and *that* check is the load-bearing one.
+#
+# ``thread.owner`` has no API-surface mutation today (verified by grep:
+# it is written only at ``open_thread``; no route or service writes it
+# afterwards), so this TOCTOU window has no live exploit path. This
+# test simulates the missing mutation via a raw ``UPDATE threads SET
+# owner`` while the close request is paused on the barrier -- the same
+# window a hypothetical future owner-transfer endpoint would open --
+# and pins that the close is *rejected*, not that it *succeeds*.
+# ---------------------------------------------------------------------------
+
+
+async def test_owner_change_between_caller_check_and_refresh_is_rejected(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory,  # type: ignore[no-untyped-def]
+) -> None:
+    """The pre-refresh ``assert_owner_can_close`` is UX (403) only; the
+    load-bearing check is ``assert_closes_thread_rule`` under the lock.
+
+    Sequence, held deterministic by the barrier:
+    1. Alice opens T-1 (owner=alice).
+    2. Alice sends /close. In the route: ``assert_owner_can_close`` runs
+       on the stale read and passes (author=alice, owner=alice).
+    3. Alice enters ``post_message_in_session`` and pauses on the
+       barrier -- above the refresh, no lock held yet.
+    4. A raw session UPDATEs ``threads.owner`` to 'bob' and commits.
+    5. The barrier releases Alice. Her refresh reads owner='bob'.
+    6. ``assert_closes_thread_rule`` fires: author=alice != owner=bob,
+       and ``owner_override`` is not set -- raises
+       ``ChatroomIntegrityError`` -> 409.
+
+    Passing verdict: response is 409 (not 201), no decide msg is
+    appended, thread stays active. The auth is *re-checked* under the
+    lock and the close is *rejected*, so the TOCTOU window closes with
+    a domain error rather than a bypass.
+
+    Failing verdict (regression): response is 201, a decide msg is
+    written for a thread the caller no longer owns. That is the
+    scenario the reviewer flagged as ``security`` on PR #19; this test
+    turns "the fix survives that scenario" into a runnable assertion.
+    """
+    from sqlalchemy import text
+
+    await _open(client, "T-1", owner="alice")
+    barrier = _install_barrier(monkeypatch)
+
+    async def close_as_alice() -> Response:
+        return await client.post(
+            "/v1/projects/p/threads/T-1/close",
+            json={"summary_content": "close by alice", "author": "alice"},
+        )
+
+    task = asyncio.create_task(close_as_alice())
+    await barrier.first_entered.wait()
+
+    # While Alice is paused, mutate ownership from a raw session --
+    # simulating a concurrent transfer that the caller-level check
+    # cannot see.
+    async with session_factory() as mutator:
+        async with mutator.begin():
+            await mutator.execute(
+                text(
+                    "UPDATE threads SET owner = :new_owner "
+                    "WHERE project = :p AND thread_id = :t"
+                ),
+                {"new_owner": "bob", "p": "p", "t": "T-1"},
+            )
+
+    barrier.release()
+    resp = await task
+
+    # Under-the-lock re-check rejects the close.
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["error_type"] == "ChatroomIntegrityError"
+    assert "owner" in body["error"].lower()
+
+    # No decide msg landed; thread stayed active.
+    r = await client.get("/v1/projects/p/threads/T-1?mode=full")
+    view = r.json()
+    assert view["thread"]["status"] == "active", view["thread"]
+    assert view["thread"]["resolved_by_msg"] is None
+    assert all(m["type"] != "decide" for m in view["messages"]), view["messages"]
+
+    # Audit stays green: no inconsistent_resolved, and the mutated owner
+    # is not reported as an issue by itself (owner mutation is not an
+    # invariant this audit tracks).
+    audit = await client.get("/v1/projects/p/integrity")
+    types = {i["type"] for i in audit.json()["issues"]}
+    assert "inconsistent_resolved" not in types
+
+
+# ---------------------------------------------------------------------------
 # 受入 5 (regression): sequential re-close still returns 409 -- the fix
 # must not change any single-writer behaviour. `test_api_close.py` already
 # holds `test_re_close_returns_409_state_error`; the redundant assertion

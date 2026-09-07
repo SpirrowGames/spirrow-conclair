@@ -40,36 +40,55 @@ _SRC_ROOT = Path(spirrow_conclair.__file__).resolve().parent
 
 
 def _count_row_lock_calls(src: str) -> int:
-    """Count ``Call`` nodes that pass ``with_for_update=True`` as a keyword.
+    """Count every AST ``Call`` that acquires a row lock via SQLAlchemy.
 
-    The keyword is what a SQLAlchemy ``session.refresh`` (or a
-    ``select(...).with_for_update()`` variant that takes it as a kw) does
-    to acquire a row lock. Any call site that lands the phrase as a real
-    argument counts; docstrings, comments, exception strings, and
-    identifier references (e.g. a wrapper attribute called
-    ``with_for_update``) do not.
+    Two forms count, because both are how ``FOR UPDATE`` reaches the
+    wire in SQLAlchemy 2.x:
 
-    A syntax error inside ``src`` re-raises: the fix's guarantee cannot
-    be pinned against source the parser cannot read, and silently
-    treating unparseable files as "zero calls" would let a broken file
-    hide a new lock.
+    - **method form**: ``select(Thread).with_for_update()`` or
+      ``query.with_for_update(...)``. In the AST this is a ``Call``
+      whose ``func`` is an ``Attribute`` with ``attr='with_for_update'``.
+      The canonical query-level lock idiom; a text scan for the phrase
+      as a keyword catches zero of these.
+    - **keyword form**: ``session.refresh(thread, with_for_update=True)``.
+      The row-lock variant of ``AsyncSession.refresh`` (and of anything
+      else that accepts it as a keyword). Only ``=True`` counts;
+      ``=False`` is a SQLAlchemy no-op.
+
+    A previous form checked only the keyword; a developer could quietly
+    add ``select(Thread).with_for_update()`` in a new file and the
+    choke-point invariant would silently regress. That regression was
+    the exact failure this counter exists to catch, so both forms are
+    now first-class.
+
+    Docstrings, exception messages, and other string literals do not
+    count -- the AST distinguishes a call from a mention. A syntax
+    error re-raises: silently treating unparseable source as "zero
+    calls" would let a broken file hide a new lock.
     """
     tree = ast.parse(src)
     count = 0
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+
+        # method form: ``<anything>.with_for_update(...)``
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "with_for_update"
+        ):
+            count += 1
+            continue
+
+        # keyword form: ``f(..., with_for_update=True)``
         for kw in node.keywords:
             if kw.arg != "with_for_update":
                 continue
-            # Only ``with_for_update=True`` counts as a lock acquisition;
-            # ``with_for_update=False`` (or any non-True literal) is a
-            # SQLAlchemy no-op for our purposes.
             if isinstance(kw.value, ast.Constant) and kw.value.value is True:
                 count += 1
-                # Same call cannot both take the lock and not; break so a
-                # duplicate kw (a syntactically odd but legal expression)
-                # is not double-counted per call.
+                # A single call cannot lock twice; break so a duplicate kw
+                # (syntactically odd but legal expression) is not
+                # double-counted per call.
                 break
     return count
 
@@ -166,3 +185,52 @@ async def h(session, thread):
     await session.refresh(thread, with_for_update=False)
 """
     assert _count_row_lock_calls(with_a_falsy_call) == 0
+
+
+def test_ast_counter_finds_method_call_form() -> None:
+    """``select(Thread).with_for_update()`` also acquires a row lock.
+
+    This is the canonical SQLAlchemy 2.x query-level lock idiom. An
+    earlier version of the counter checked only for ``with_for_update``
+    as a keyword argument and silently ignored the method call, so a
+    developer could quietly add ``select(Thread).with_for_update()`` in
+    a new file and the choke-point invariant would regress with no test
+    firing. This test is the regression pin for that gap.
+
+    Variants covered here: chained on a ``select(...)``, chained on an
+    identifier (as a fluent query builder), and with keyword arguments
+    (``nowait=True`` / ``read=True``) -- all of them lock a row.
+    """
+    method_form = """
+from sqlalchemy import select
+
+def a(session):
+    return session.execute(select(Thread).with_for_update()).scalar_one()
+
+def b(query):
+    return query.with_for_update(nowait=True).all()
+
+def c(query):
+    return query.with_for_update(read=True).all()
+"""
+    assert _count_row_lock_calls(method_form) == 3
+
+
+def test_ast_counter_counts_mixed_forms_together() -> None:
+    """Method-call form and keyword-form both contribute to the same total.
+
+    If a real production file combined the two (e.g. a helper using
+    ``.with_for_update()`` and the main choke point using
+    ``refresh(..., with_for_update=True)``), the site test needs to see
+    both, not one or the other. Pins the union semantics of the counter
+    so a future refactor cannot make the counter double-count nor drop
+    a form.
+    """
+    mixed = """
+from sqlalchemy import select
+
+def a(session, thread):
+    session.execute(select(Thread).with_for_update()).scalar_one()
+    session.refresh(thread, with_for_update=True)
+"""
+    assert _count_row_lock_calls(mixed) == 2
