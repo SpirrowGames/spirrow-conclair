@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from spirrow_conclair.schemas.close_sanction_vocab import UnattributableReason
+
 EventAction = Literal[
     "open_thread", "post_message", "status_transition", "mark_read",
 ]
@@ -39,9 +41,6 @@ class EventListResponse(BaseModel):
     total: int
     limit: int
     offset: int
-
-
-UnattributableReason = Literal["pre_recording", "unclassified_override"]
 
 
 class IntegrityIssue(BaseModel):

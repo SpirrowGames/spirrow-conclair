@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from spirrow_conclair.schemas.close_sanction_vocab import CloseSanctionKind
 from spirrow_conclair.schemas.thread import Thread
 
 MessageType = Literal[
@@ -33,7 +34,10 @@ class CloseSanction(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    kind: Literal["human_override", "pr_gate_ledger", "unspecified"]
+    #: Wire vocabulary lives in `schemas/close_sanction_vocab.py` -- the one
+    #: place every layer imports its Literal from, so this class carries no
+    #: string constants of its own.
+    kind: CloseSanctionKind
     #: human_override: the Tier-C reason. Required for that kind.
     reason: str | None = None
     #: pr_gate_ledger evidence, all three required for that kind.
