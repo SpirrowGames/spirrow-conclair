@@ -3,6 +3,24 @@
     &nbsp;|&nbsp; checked_at: {{ result.checked_at | iso }}
 </p>
 
+{# A non-owner close is not automatically breakage: the PR-gate ledger
+   carve-out and a human force-close are both sanctioned, and counting them
+   as issues made the number climb with every merged PR. Sanctioned closes
+   are shown as counts only -- listing them would bring the same growth back
+   in a new column. `sanction_recording_since` is on the page because it says
+   whether the strictest bucket is armed: unset, nothing is ever reported as
+   corruption. #}
+<p class="muted">
+    sanctioned closes: pr_gate_ledger <strong>{{ result.sanctioned_counts.pr_gate_ledger }}</strong>,
+    human_override <strong>{{ result.sanctioned_counts.human_override }}</strong>
+    &nbsp;|&nbsp; unattributable: <strong>{{ result.unattributable | length }}</strong>
+    {%- set unclassified = result.unattributable | selectattr("reason", "equalto", "unclassified_override") | list %}
+    {%- if unclassified %} ({{ unclassified | length }} unclassified_override){% endif %}
+    &nbsp;|&nbsp; sanction_recording_since:
+    {% if result.sanction_recording_since %}{{ result.sanction_recording_since | iso }}
+    {%- else %}<strong>unset</strong> — no close is reported as corruption{% endif %}
+</p>
+
 {% if result.issues %}
 {# Stacked on a phone (see .table-stack in conclair.css). The `details` JSON
    is the reason: side-scrolling past three narrow columns to reach the one
@@ -28,7 +46,16 @@
                 {% endif %}
             </td>
             <td data-label="msg_id">{% if issue.msg_id %}<code>{{ issue.msg_id }}</code>{% endif %}</td>
-            <td data-label="details"><code>{{ issue.details | tojson }}</code></td>
+            <td data-label="details">
+                <code>{{ issue.details | tojson }}</code>
+                {# Only `closes_thread_by_non_owner` carries this, and it decides
+                   where the investigation starts: with the event, the row reached
+                   the API and was not recorded (a rollback window); without it,
+                   the row never went through the API at all. #}
+                {% if issue.has_status_transition_event is not none %}
+                <br><span class="muted">has_status_transition_event: {{ issue.has_status_transition_event }}</span>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </tbody>

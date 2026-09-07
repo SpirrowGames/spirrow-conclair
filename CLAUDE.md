@@ -290,6 +290,37 @@ CHECK は将来 assert を通らない書き込み経路が生えたときの最
 
 audit endpoint (`GET /integrity`) は同条件 + `inconsistent_resolved` (status=resolved XOR resolved_by_msg) を全件 scan で報告。
 
+### 非 owner close は 3 種類ある (`services/close_sanction.py`)
+
+不変条件 3 を緩める `owner_override` には**性質の違う 2 つの bypass が相乗り**している —
+human の Tier-C force-close と、PR-gate 台帳の carve-out。どちらも wire 上は bool 1 個に潰れるので、
+audit は正規の close も本物の破損も同じ `closes_thread_by_non_owner` として報告していた。
+∴ **PR を 1 本 merge するたびに issue が 1 件増える** (spirrow-playproof で 45 件、うち force-close は 2 件)。
+開発量に比例して伸びる数字は健全性の指標になりえない。
+
+対処は「証拠を新しく作る」ではなく「捨てているものを渡す」: Magickit は close を通す瞬間に
+根拠 (`LedgerVerdict` / human の reason) を構造として持っており、それを bool に射影して捨てていた。
+`close_sanction: {kind, ...evidence}` を request に足し、`post_message` の audit event の `details` に積む
+(`chatroom_events.msg_id` 列が帰属キー ∴ **migration 不要**、かつ **msg 単位**で引ける)。
+
+**記録器は 1 箇所だけ** — `post_message_in_session`。`closes_thread` を書ける経路
+(`POST /messages` と `POST /close`) が両方ここを通り、`open_thread` は `closes_thread=None` 固定なので、
+「記録が無い = 書き込み経路を通っていない」が言える。呼び出し側に散らすと、
+1 箇所書き忘れただけで直接 INSERT と区別できなくなり、この検出は意味を失う。
+
+判定は 4 分岐で、**第一分岐は記録の有無であって時刻ではない**。詳細は `docs/api-design.md` §3.7 と
+モジュール docstring。時刻を先に見ると deploy skew 窓 (Conclair だけ上げた状態) の legacy 呼び出しが
+全部 corruption になる。逆に時刻を一切見ないと、書き込み経路を迂回した行が legacy と区別できない。
+
+Conclair は主張を**検証しない** (GitHub を引かない = leaf を壊さない)。価値は「検証済み」ではなく
+`merged_head` + `approving_review_id` から**後で引き直せる**こと。ただし主張の**形**は検査する:
+証拠を伴わない `pr_gate_ledger` は反証不能で、`chatroom_events` は append-only ∴ 永久に残る。
+∴ 422 で境界で断る。
+
+`SANCTION_RECORDING_SINCE` **未設定なら corruption は 1 件も報告されない**。cutover はコードが知りえない
+deploy の事実 (ソースに焼いた日付は、書いた日と出した日のずれの分だけ偽陽性を作る) なので設定値にした。
+未設定であることは `/integrity` の応答と `/ui` に出る — config file に隠れないのが仕様。
+
 ## Status 遷移
 
 `services/status_transition.py` の pure function:
@@ -320,6 +351,7 @@ tests/unit/        # 143 cases (services の pure 部分)
   test_msg_id_allocator.py     # format/parse round-trip
   test_integrity.py            # assert_closes_thread_rule / assert_next_participant_rule
   test_thread_rollup.py        # 活動 rollup の射影 (all-NULL / 桁埋め)
+  test_close_sanction.py       # 非 owner close の分類 (記録が先、時刻は記録が無い枝だけ)
   test_digest_schemas.py       # scope↔target_msg_id の整合 / CHECK との一致
   test_exceptions.py           # 階層 + details propagation
 
@@ -330,6 +362,9 @@ tests/integration/ # 153 cases + 2 perf, testcontainers postgres:16
   test_api_close.py        # close shortcut + permission + state
   test_api_events.py       # audit log filter
   test_api_integrity.py    # injection + project scope + 活動キーの一貫性
+  test_api_close_sanction.py # 非 owner close の 4 分岐 (sanctioned / unattributable / corruption)
+                             # + 1 thread に closing msg 2 件 (帰属が msg 単位である証明)
+                             # + event が 1 行も無い close (検出器が不在に依存しない証明)
   test_api_control.py      # loop control: 既定値 / 422 / 履歴 / INV-4 回帰
   test_api_next_participant.py # INV-7: close 側 2 route + open_thread + ORM 直挿し (CHECK 単体)
   test_migration_control.py # 0005 の up/down/up (捨てDBで実行)
@@ -388,6 +423,7 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 | `LOG_LEVEL` | INFO | logging level |
 | `DB_POOL_SIZE` | 5 | SQLAlchemy async pool |
 | `DB_MAX_OVERFLOW` | 10 | pool overflow |
+| `SANCTION_RECORDING_SINCE` | (未設定) | close sanction の記録が始まった instant。**未設定だと `closes_thread_by_non_owner` が 1 件も出ない**。deploy 時に設定する。naive 値は UTC 扱い |
 
 ## 拡張ポイント
 

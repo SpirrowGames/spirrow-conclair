@@ -5,13 +5,78 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from spirrow_conclair.schemas.thread import Thread
 
 MessageType = Literal[
     "propose", "question", "answer", "decide", "report", "handoff", "ack"
 ]
+
+
+class CloseSanction(BaseModel):
+    """Why a non-owner close was allowed through, as structure rather than a bit.
+
+    ``owner_override`` says only that *some* bypass applied. Two distinct ones
+    ride it -- a human Tier-C force-close and the PR-gate ledger carve-out --
+    and the audit could not tell them apart from a genuinely corrupt row, so a
+    project's issue count grew by one per merged PR. See
+    ``services.close_sanction``.
+
+    Conclair does not check the claim (D-3: no cross-service lookups, same
+    boundary as ``role``). It checks only that the claim is *shaped* so a
+    reader can check it later: a ledger carve-out without ``merged_head`` is
+    not re-derivable, and ``messages`` / ``chatroom_events`` are append-only,
+    so a hollow record cannot be repaired afterwards. A caller that omits the
+    evidence gets 422 now instead of an unfalsifiable row forever.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    kind: Literal["human_override", "pr_gate_ledger", "unspecified"]
+    #: human_override: the Tier-C reason. Required for that kind.
+    reason: str | None = None
+    #: pr_gate_ledger evidence, all three required for that kind.
+    pr: str | None = None
+    merged_head: str | None = None
+    approving_review_id: str | None = None
+
+    @model_validator(mode="after")
+    def _evidence_matches_kind(self) -> CloseSanction:
+        ledger_fields = {
+            "pr": self.pr,
+            "merged_head": self.merged_head,
+            "approving_review_id": self.approving_review_id,
+        }
+        if self.kind == "human_override":
+            if not self.reason:
+                raise ValueError("close_sanction kind='human_override' requires 'reason'")
+            supplied = [name for name, v in ledger_fields.items() if v]
+            if supplied:
+                raise ValueError(
+                    f"close_sanction kind='human_override' does not carry "
+                    f"ledger evidence, got {sorted(supplied)}"
+                )
+        elif self.kind == "pr_gate_ledger":
+            missing = [name for name, v in ledger_fields.items() if not v]
+            if missing:
+                raise ValueError(
+                    f"close_sanction kind='pr_gate_ledger' requires {sorted(missing)}"
+                )
+            if self.reason:
+                raise ValueError(
+                    "close_sanction kind='pr_gate_ledger' does not carry 'reason'"
+                )
+        else:  # unspecified: a claim of no claim, so it carries no evidence
+            supplied = [name for name, v in ledger_fields.items() if v]
+            if self.reason:
+                supplied.append("reason")
+            if supplied:
+                raise ValueError(
+                    f"close_sanction kind='unspecified' carries no evidence, "
+                    f"got {sorted(supplied)}"
+                )
+        return self
 
 
 class Message(BaseModel):
@@ -73,6 +138,12 @@ class PostMessageRequest(BaseModel):
     # stays in Magickit); this flag relaxes ownership only.
     owner_override: bool = False
     owner_override_reason: str | None = None
+    # Which bypass `owner_override` stands for, so the audit can tell a
+    # sanctioned close from a corrupt one. Optional and additive: a caller
+    # that sends only the boolean is recorded as kind='unspecified', which
+    # keeps its close out of the issue list without claiming to know why it
+    # was allowed. See `services.close_sanction`.
+    close_sanction: CloseSanction | None = None
 
 
 class PostMessageResponse(BaseModel):
@@ -108,6 +179,10 @@ class CloseThreadRequest(BaseModel):
     # Magickit decides (human-only) and supplies the reason for the audit.
     owner_override: bool = False
     owner_override_reason: str | None = None
+    # See PostMessageRequest.close_sanction. This is the route the PR-gate
+    # ledger carve-out uses, so it is the one that carries `pr_gate_ledger`
+    # evidence in practice.
+    close_sanction: CloseSanction | None = None
 
 
 class CloseThreadResponse(BaseModel):

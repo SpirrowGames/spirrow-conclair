@@ -428,6 +428,7 @@ async def close_thread(
             next_participant=body.next_participant,
             owner_override=body.owner_override,
             owner_override_reason=body.owner_override_reason,
+            close_sanction=body.close_sanction,
         )
         # Inside the txn, after post_message_in_session flushed the decide
         # msg -- so the count includes the msg this call just wrote.
