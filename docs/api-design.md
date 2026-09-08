@@ -57,7 +57,8 @@ cursor-based ではなく offset-based。理由:
 | 403 | `ChatroomPermissionError` | close_thread を non-owner が試行、等 |
 | 404 | `ChatroomNotFoundError` | thread / msg / project not found |
 | 409 | `ChatroomIntegrityError` | invariant 違反 (FK / 重複 / 順序制約) |
-| 409 | `ChatroomStateError` | 状態遷移不正 (resolved の再 close 等) |
+| 409 | `ChatroomStateError` | 状態遷移不正 (parked / superseded への close 等) |
+| 409 | `ChatroomThreadResolvedError` | resolved thread への書き込み (resolved の再 closeを含む)。`ChatroomStateError` の subclass なので 409 のまま |
 | 422 | `ValidationError` | pydantic schema validation (FastAPI default) |
 | 500 | `ChatroomDBError` | DB エラー |
 | 503 | `ServiceUnavailable` | DB 接続不能 (health check で出る) |

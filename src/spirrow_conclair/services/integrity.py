@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from spirrow_conclair.exceptions import (
     ChatroomIntegrityError,
     ChatroomNotFoundError,
-    ChatroomStateError,
+    ChatroomThreadResolvedError,
 )
 from spirrow_conclair.models import ChatroomEvent, Message, Thread
 from spirrow_conclair.schemas.event import (
@@ -93,13 +93,26 @@ def assert_thread_writable(thread: Thread) -> None:
     the topic, open a new thread and reference it" -- the same shape
     ``references_threads`` already writes.
 
+    The refusal is ``ChatroomThreadResolvedError``, a ``ChatroomStateError``
+    subclass, so it stays a 409 and every existing ``except
+    ChatroomStateError`` still catches it. The subclass exists because this
+    assert **took over** a refusal that used to come from
+    ``compute_transition``: on the close-a-resolved-thread path this now
+    answers first, and its message does not carry the ``status='resolved'``
+    substring that one rendered. A client classifying the refusal by prose
+    therefore stops recognising it the moment this assert ships -- silently,
+    because both sides stay self-consistent. Naming the state in
+    ``error_type`` is what makes the refusal identifiable without reading the
+    sentence. See ``ChatroomThreadResolvedError`` for who reads it.
+
     Raises:
-        ChatroomStateError: If ``thread.status`` is terminal for writes.
-            409 by exception mapping (see ``exceptions.py``).
+        ChatroomThreadResolvedError: If ``thread.status`` is terminal for
+            writes. A ``ChatroomStateError``, so still 409 by exception
+            mapping (see ``exceptions.py``).
     """
     if thread.status != _WRITE_TERMINAL_STATUS:
         return
-    raise ChatroomStateError(
+    raise ChatroomThreadResolvedError(
         f"Thread '{thread.thread_id}' is resolved and cannot take new "
         f"messages. To continue, open a new thread and reference this one "
         f"via `references_threads`.",

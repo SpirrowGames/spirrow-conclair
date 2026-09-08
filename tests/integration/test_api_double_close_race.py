@@ -198,12 +198,15 @@ async def test_parallel_close_close_writes_exactly_one_closing_msg(
 
     # Second entered post_message_in_session after first was paused, so
     # second wins (commits first). The first is released, its refresh
-    # reads status='resolved', and compute_transition raises
-    # ChatroomStateError -> 409.
+    # reads status='resolved', and `assert_thread_writable` -- which runs
+    # immediately after that refresh, ahead of `compute_transition` --
+    # raises ChatroomThreadResolvedError -> 409. (It was compute_transition
+    # that raised here before `assert_thread_writable` shipped; the
+    # transition computer is no longer reached on this path.)
     assert resp_second.status_code == 201, resp_second.text
     assert resp_first.status_code == 409, resp_first.text
     body_first = resp_first.json()
-    assert body_first["error_type"] == "ChatroomStateError"
+    assert body_first["error_type"] == "ChatroomThreadResolvedError"
     assert "resolved" in body_first["error"]
 
     # Ground truth: only one closing msg exists in the thread.
@@ -324,7 +327,7 @@ async def test_parallel_handoff_vs_close_close_first_refuses_the_handoff(
     assert resp_close.status_code == 201, resp_close.text
     assert resp_handoff.status_code == 409, resp_handoff.text
     body_handoff = resp_handoff.json()
-    assert body_handoff["error_type"] == "ChatroomStateError"
+    assert body_handoff["error_type"] == "ChatroomThreadResolvedError"
     assert "resolved" in body_handoff["error"]
     # Machine-readable pointer to where the decision was recorded, so the
     # refused client (typically an agent) can open a new thread and
@@ -674,4 +677,4 @@ async def test_sequential_re_close_still_returns_409(client: AsyncClient) -> Non
         json={"summary_content": "second", "author": "alice"},
     )
     assert r2.status_code == 409
-    assert r2.json()["error_type"] == "ChatroomStateError"
+    assert r2.json()["error_type"] == "ChatroomThreadResolvedError"

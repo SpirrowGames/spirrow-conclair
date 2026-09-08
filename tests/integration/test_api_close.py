@@ -169,7 +169,11 @@ async def test_re_close_returns_409_state_error(client: AsyncClient) -> None:
     )
     assert r2.status_code == 409
     body = r2.json()
-    assert body["error_type"] == "ChatroomStateError"
+    # `ChatroomThreadResolvedError`, not the bare `ChatroomStateError`: the
+    # refusal comes from `assert_thread_writable`, which names the state on
+    # the wire so a client need not match prose. Still a ChatroomStateError
+    # subclass, so still 409.
+    assert body["error_type"] == "ChatroomThreadResolvedError"
     assert "resolved" in body["error"]
 
 

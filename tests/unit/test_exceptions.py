@@ -9,6 +9,7 @@ from spirrow_conclair.exceptions import (
     ChatroomNotFoundError,
     ChatroomPermissionError,
     ChatroomStateError,
+    ChatroomThreadResolvedError,
 )
 
 
@@ -30,9 +31,28 @@ def test_subclass_hierarchy() -> None:
         ChatroomIntegrityError,
         ChatroomPermissionError,
         ChatroomStateError,
+        ChatroomThreadResolvedError,
         ChatroomDBError,
     ):
         assert issubclass(cls, ChatroomError)
+
+
+def test_thread_resolved_is_a_state_error() -> None:
+    """The subclass relationship is what keeps the change blast-free.
+
+    Two things ride on it and neither is visible at the raise site: the 409
+    mapping (Starlette finds the parent's handler by walking the MRO) and
+    every pre-existing ``except ChatroomStateError``, which must keep
+    catching this refusal.
+    """
+    assert issubclass(ChatroomThreadResolvedError, ChatroomStateError)
+
+    try:
+        raise ChatroomThreadResolvedError("resolved")
+    except ChatroomStateError as exc:
+        assert type(exc) is ChatroomThreadResolvedError
+    else:  # pragma: no cover - the except above always fires
+        raise AssertionError("an existing `except ChatroomStateError` stopped catching it")
 
 
 def test_details_default_empty_dict_is_independent() -> None:

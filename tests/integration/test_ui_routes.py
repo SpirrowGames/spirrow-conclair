@@ -405,7 +405,8 @@ async def test_close_thread_already_resolved_state_error(
     )
     assert second.status_code == 200
     assert "hx-refresh" not in {k.lower() for k in second.headers.keys()}
-    assert "ChatroomStateError" in second.text or "ChatroomIntegrityError" in second.text
+    flashed = second.text
+    assert "ChatroomThreadResolvedError" in flashed or "ChatroomIntegrityError" in flashed
 
 
 @pytest.mark.asyncio

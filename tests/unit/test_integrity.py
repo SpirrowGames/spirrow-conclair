@@ -13,7 +13,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from spirrow_conclair.exceptions import ChatroomIntegrityError, ChatroomStateError
+from spirrow_conclair.exceptions import (
+    ChatroomIntegrityError,
+    ChatroomStateError,
+    ChatroomThreadResolvedError,
+)
 from spirrow_conclair.models import Thread
 from spirrow_conclair.services.integrity import (
     assert_closes_thread_rule,
@@ -215,16 +219,25 @@ def test_writable_when_thread_is_non_resolved_terminal(status: str) -> None:
 
 
 def test_resolved_thread_is_refused_with_state_error() -> None:
-    # The msg-405/msg-406 disposition: resolved is terminal for writes,
-    # and the refusal is `ChatroomStateError` -> 409 (the same class the
-    # pre-existing re-close path already surfaces).
-    with pytest.raises(ChatroomStateError) as ei:
+    # The msg-405/msg-406 disposition: resolved is terminal for writes, and
+    # the refusal is a `ChatroomStateError` -> 409.
+    #
+    # Asserted as the exact type, not `isinstance`. A regression that raised
+    # the bare parent would still satisfy `pytest.raises(ChatroomStateError)`
+    # while changing the `error_type` an out-of-repo consumer classifies on
+    # -- so the looser assertion would pass through the one change that
+    # matters. The envelope itself is pinned in
+    # `tests/unit/test_error_handlers.py`; this pins the raise.
+    with pytest.raises(ChatroomThreadResolvedError) as ei:
         assert_thread_writable(
             _thread(status="resolved", resolved_by_msg="msg-042")
         )
     # `resolved` in the message so callers can grep -- the `test_re_close`
     # assertion in test_api_close.py reads exactly this substring.
     assert "resolved" in ei.value.message
+    assert type(ei.value) is ChatroomThreadResolvedError
+    # Still the parent, so the 409 mapping and existing catch sites hold.
+    assert isinstance(ei.value, ChatroomStateError)
 
 
 def test_refusal_details_include_resolved_by_msg_pointer() -> None:

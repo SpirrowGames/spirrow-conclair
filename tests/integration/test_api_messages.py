@@ -247,7 +247,7 @@ async def test_post_to_resolved_thread_is_refused_regardless_of_type(
         type=msg_type, author="bob", content="after-decide", **extra,
     )
     assert code == 409, body
-    assert body["error_type"] == "ChatroomStateError"
+    assert body["error_type"] == "ChatroomThreadResolvedError"
     assert "resolved" in body["error"]
 
     # Machine-readable pointer: "the settled thread is *this* msg, and if
