@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Single source of truth for the spirrow-conclair gate.
+# .github/workflows/ci.yml (job `test`, step "Unit tests") runs `bash .mindwire-gate`,
+# and so does the autonomous loop's implementer (spirrow-mindwire
+# src/spirrow_mindwire/adapters/implementer.py:138-139). Exit 0 = green.
+#
+# Green here is NECESSARY, not sufficient: the integration suite is deliberately
+# not in this file (see below), so a pull request is still judged by CI's
+# integration job on top of this.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# Why the unit suite only, and not tests/integration:
+#   tests/integration/conftest.py:36 starts a throw-away postgres:16 through
+#   testcontainers, i.e. it requires a Docker daemon. The autonomous loop host
+#   (sg-tomtebo-01, Windows) has no docker.exe under C:\Program Files\Docker,
+#   and the pytest cache in its working clone lists 232 collected unit node ids
+#   and zero integration ones. A gate the implementer cannot run is a gate that
+#   gets worked around; a gate that runs a different suite depending on the host
+#   makes "green" name two different predicates. Integration therefore stays a
+#   CI-only job, and CI keeps running it -- see the note above.
+#
+# Why no ruff and no mypy:
+#   Both are configured in pyproject.toml and have been run here by hand
+#   (.ruff_cache / .mypy_cache exist), but no pull request in this repository has
+#   ever been judged by them. .github/workflows/ci.yml records that as a decision:
+#   both report pre-existing findings on main, so a gate would be red on arrival
+#   and would train everyone to ignore it. A gate may not be stricter than the bar
+#   the repository actually applies to itself. If they should gate this repo, add
+#   them to THIS file: it is now the only place to add them, and CI picks the
+#   change up in the same commit.
+#
+# Why DATABASE_URL is defaulted here rather than left to the caller:
+#   src/spirrow_conclair/main.py:88 builds the app at import time, so
+#   Settings.database_url -- required, and there is no committed .env -- must
+#   exist before tests/unit/test_templates_no_external_assets.py can be COLLECTED.
+#   Without it the gate is red at collection for a reason unrelated to the change
+#   under test. The unit suite never opens a connection.
+#
+#   This line is the ONLY place the placeholder exists. .github/workflows/ci.yml
+#   used to carry it in the `test` job's env, and no longer does: the unit step
+#   is now this file, and the integration suite never needs the placeholder --
+#   it supplies the container's real URL from tests/integration/conftest.py:64
+#   and :115, both of which run before anything constructs Settings (measured
+#   2026-09-09: nothing under tests/integration imports spirrow_conclair.main at
+#   module scope, and nothing in src/ imports it at all).
+#
+#   Keeping a second copy in ci.yml would not merely be untidy: with the job env
+#   still set, deleting the line below would leave CI green and break only the
+#   loop host, at collection. Removing it there is what makes CI able to see the
+#   deletion.
+#
+#   A real DATABASE_URL in the environment still wins.
+export DATABASE_URL="${DATABASE_URL:-postgresql+asyncpg://unused:unused@127.0.0.1:5432/unused}"
+
+# One command, not `uv sync` + `uv run`: `uv run` builds the environment from
+# uv.lock itself, so a separate sync line would only be a second place for the
+# flag to disagree with this one.
+#
+# No `--extra dev`. conclair declares its dev dependencies as a PEP 735
+# [dependency-groups] group, which uv installs by default; there is no `dev`
+# extra in this repo. Do NOT copy that flag from the spirrow-magickit or
+# spirrow-lexora gates -- there it is load-bearing, here it names nothing.
+#
+# UV_PYTHON is honoured by uv itself; CI sets it per matrix entry, and locally it
+# is unset. That is why no --python flag appears here.
+#
+# `-q` is what CI passed before this file existed; pytest reports failures in
+# full either way. Recorded because it is a choice, not a leftover.
+#
+# --locked (not --frozen): uv lock --check measured clean at 5523324 on 2026-09-09.
+# --frozen declines to write the lock but does not detect drift between it and
+# pyproject.
+uv run --locked pytest tests/unit -q
