@@ -1,4 +1,4 @@
-"""Integrity invariants (System Design v2 §9).
+"""Integrity invariants (System Design v2 §9, ``docs/system-design-v2.md``).
 
 Two flavors:
 

@@ -28,7 +28,7 @@ Claude Code / Claude.ai                 人間の Browser
   infra-stack (postgres:16 + redis:7)
 ```
 
-設計の詳細は spirrow-magickit project の magickit doc `chatroom-archive-tool: System Design v2` (Drive doc_id: `146fAk9SSnFTg24cMN9t0QlymzbwiZUg4PFWcVxxuBuI`) を参照。HTTP API 詳細は `docs/api-design.md`。
+設計の詳細は `docs/system-design-v2.md` (`chatroom-archive-tool: System Design v2`) を参照。HTTP API 詳細は `docs/api-design.md`、chatroom の運用ルールは `docs/chatroom-operating-rules.md`。
 
 ## 技術スタック
 
@@ -109,8 +109,12 @@ alembic/                 # migration
     └── 0008_thread_digests.py
 
 docs/
-├── api-design.md        # HTTP API 詳細仕様 (T02)
-└── usage-cheatsheet.md  # 運用 cheat sheet (T13)
+├── system-design-v2.md              # chatroom-archive-tool: System Design v2 (T15)
+├── api-design.md                    # HTTP API 詳細仕様 (T02)
+├── usage-cheatsheet.md              # 運用 cheat sheet (T13)
+├── chatroom-operating-rules.md      # chatroom 運用ルール README v0.2 (active)
+├── chatroom-operating-rules-v01.md  # 同 v0.1 (superseded。未回収データの schema)
+└── t-meta-chatroom-design-archive.md # 設計議論の一次記録 (archived)
 deploy/systemd/spirrow-conclair.service
 deploy/systemd/spirrow-conclair-backup.{service,timer}
 scripts/
@@ -401,7 +405,7 @@ uv sync
 
 UI を開発 PC のブラウザで開く:
 ```bash
-ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
+ssh -L 8115:127.0.0.1:8115 {{USER_SERVICES}}@<host>
 # 開発 PC のブラウザで http://localhost:8115/ui/
 ```
 
@@ -410,7 +414,7 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 ## 外部依存
 
 - **infra-stack.service** (postgres + redis) — `Requires=` で接続。停止すれば conclair も停止する
-- **/home/sgadmin/services/infra/.env** の `CONCLAIR_APP_PASSWORD` — `.env` の DATABASE_URL と一致させる必要あり
+- **{{PATH_SERVICES_ROOT}}/infra/.env** の `CONCLAIR_APP_PASSWORD` — `.env` の DATABASE_URL と一致させる必要あり
 
 ## 設定
 
@@ -435,4 +439,4 @@ UI (`/ui`) も **loopback bind + auth なし** が前提。VPN 越しで複数�
 
 - [spirrow-magickit](https://github.com/SpirrowGames/spirrow-magickit) — MCP wrapper、AI session が叩く入口
 - [spirrow-voxelworld](https://github.com/SpirrowGames/spirrow-voxelworld) — chatroom 機構の utility 利用者・spec オーナー
-- 共有 infra: `/home/sgadmin/services/infra/` (postgres + redis docker-compose)
+- 共有 infra: `{{PATH_SERVICES_ROOT}}/infra/` (postgres + redis docker-compose)

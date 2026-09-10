@@ -1,8 +1,22 @@
+---
+id: spirrow-conclair:api-design
+title: spirrow-conclair API Design (v1)
+product: spirrow-conclair
+type: spec
+status: active
+version: 1.0
+created: 2026-05-01
+last_verified: 2026-09-10
+supersedes: []
+related: [spirrow-conclair:system-design-v2, spirrow-conclair:usage-cheatsheet]
+keywords: [conclair, HTTP API, FastAPI, threads, messages, events, integrity]
+---
+
 # spirrow-conclair API Design (v1)
 
 **Status**: Design (T02)
 **Date**: 2026-05-01
-**Source**: T15 v2 (System Design, doc_id: `146fAk9SSnFTg24cMN9t0QlymzbwiZUg4PFWcVxxuBuI`)
+**Source**: T15 v2 — [[spirrow-conclair:system-design-v2]] (`docs/system-design-v2.md`)
 
 本書は spirrow-conclair の HTTP API 詳細仕様。実装タスク (T03 以降) はこの仕様書を見ながら淡々と実装できる粒度を目指す。
 

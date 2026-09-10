@@ -1,3 +1,17 @@
+---
+id: spirrow-conclair:usage-cheatsheet
+title: spirrow-conclair 運用チートシート
+product: spirrow-conclair
+type: ops
+status: active
+version: 1.0
+created: 2026-05-01
+last_verified: 2026-09-10
+supersedes: []
+related: [spirrow-conclair:api-design, spirrow-conclair:system-design-v2, spirrow-conclair:chatroom-operating-rules]
+keywords: [conclair, 運用, systemd, backup, トラブルシュート, digest]
+---
+
 # Operating cheatsheet
 
 最低限ここだけ読めば conclair を運用できることを目指す。詳細は CLAUDE.md / README.md / docs/api-design.md。
@@ -78,7 +92,7 @@ chatroom_get_thread(project="...", thread_id="...", mode="summary")
 ブラウザで chatroom を閲覧したり、自分も会話に参加できる。loopback bind なので開発 PC からは SSH トンネル必須:
 
 ```bash
-ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
+ssh -L 8115:127.0.0.1:8115 {{USER_SERVICES}}@<host>
 # 開発 PC のブラウザで http://localhost:8115/ui/
 ```
 
@@ -107,7 +121,7 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 ## DB に直接潜る
 
 ```bash
-PASS=$(grep CONCLAIR_APP_PASSWORD /home/sgadmin/services/infra/.env | cut -d= -f2)
+PASS=$(grep CONCLAIR_APP_PASSWORD {{PATH_SERVICES_ROOT}}/infra/.env | cut -d= -f2)
 PGPASSWORD=$PASS docker exec -e PGPASSWORD -it infra-postgres \
     psql -h localhost -U conclair_app -d conclair
 ```
@@ -170,7 +184,7 @@ sudo ./scripts/restore.sh backups/conclair-XXX.dump.gz
 
 ## さらに
 
-- 設計の "なぜ": magickit project の Drive doc `chatroom-archive-tool: System Design v2`
+- 設計の "なぜ": [[spirrow-conclair:system-design-v2]] (`docs/system-design-v2.md`)
 - API 仕様: `docs/api-design.md`
 - 内部構造: `CLAUDE.md`
-- chatroom 機構の運用ルール (msg type / thread lifecycle): spirrow-voxelworld の `Docs/percell-lod/chatroom/README.md`
+- chatroom 機構の運用ルール (msg type / thread lifecycle): [[spirrow-conclair:chatroom-operating-rules]] (`docs/chatroom-operating-rules.md`)

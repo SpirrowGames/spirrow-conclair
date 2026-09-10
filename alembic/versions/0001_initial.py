@@ -4,7 +4,8 @@ Revision ID: 0001
 Revises:
 Create Date: 2026-05-01
 
-Faithfully implements the schema in chatroom-archive-tool: System Design v2 §5.
+Faithfully implements the schema in chatroom-archive-tool: System Design v2 §5
+(``docs/system-design-v2.md``).
 Hand-written rather than autogenerate so JSONB defaults and CHECK constraints
 match the design exactly.
 """
