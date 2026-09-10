@@ -7,7 +7,7 @@ value without races: an advisory lock keyed on `hashtext(project)` keeps
 concurrent inserts within the same project serialized for the duration
 of the surrounding transaction.
 
-Per System Design v2 §9.1.
+Per System Design v2 §9.1 (``docs/system-design-v2.md``).
 """
 
 from __future__ import annotations

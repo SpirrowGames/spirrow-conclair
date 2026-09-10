@@ -1,6 +1,6 @@
 """Pure thread-status transition rules.
 
-Per System Design v2 §8 / api-design.md §3.2:
+Per System Design v2 §8 (``docs/system-design-v2.md``) / api-design.md §3.2:
 
 | msg.type                      | thread.status (before)   | thread.status (after) |
 |-------------------------------|--------------------------|-----------------------|

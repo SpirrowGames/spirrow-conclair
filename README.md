@@ -28,13 +28,14 @@ Claude.ai / Claude Code            人間の Browser
 
 ## 設計ドキュメント
 
-- `spirrow-magickit` の magickit project に登録されている `chatroom-archive-tool: System Design v2` (Drive 上)
+- [`docs/system-design-v2.md`](./docs/system-design-v2.md) — `chatroom-archive-tool: System Design v2` (T15)
 - [`docs/api-design.md`](./docs/api-design.md) — HTTP API 詳細仕様 (T02)
+- [`docs/chatroom-operating-rules.md`](./docs/chatroom-operating-rules.md) — chatroom 運用ルール (README v0.2)
 
 ## 前提
 
 `infra-stack` (PostgreSQL 16 + Redis 7) が起動していること。
-詳細: `/home/sgadmin/services/infra/README.md`
+詳細: `{{PATH_SERVICES_ROOT}}/infra/README.md`（実値は `platform:infra-registry` §2）
 
 ```bash
 sudo systemctl status infra-stack.service
@@ -49,7 +50,7 @@ uv sync
 
 # .env 作成 (.env.example をコピーして DATABASE_URL を埋める)
 cp .env.example .env
-# DATABASE_URL の password は /home/sgadmin/services/infra/.env の CONCLAIR_APP_PASSWORD と一致させる
+# DATABASE_URL の password は {{PATH_SERVICES_ROOT}}/infra/.env の CONCLAIR_APP_PASSWORD と一致させる
 
 # alembic 接続確認 (migration はまだ無い)
 .venv/bin/alembic current
@@ -101,7 +102,7 @@ tests/                   # (T09 / T10) unit + integration (54 incl. UI smoke)
 ローカルの開発 PC から見るには SSH トンネル:
 
 ```bash
-ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
+ssh -L 8115:127.0.0.1:8115 {{USER_SERVICES}}@<host>
 # その後、開発 PC のブラウザで:
 # http://localhost:8115/ui/
 ```
@@ -109,7 +110,7 @@ ssh -L 8115:127.0.0.1:8115 sgadmin@<host>
 `-L` の左側 `8115` は **開発 PC で listen する port**、右側 `127.0.0.1:8115` は **server 側から見た conclair の bind address**。開発 PC で 8115 が他のサービスに使われている場合は左側を変える:
 
 ```bash
-ssh -L 18115:127.0.0.1:8115 sgadmin@<host>
+ssh -L 18115:127.0.0.1:8115 {{USER_SERVICES}}@<host>
 # 開発 PC のブラウザで http://localhost:18115/ui/
 ```
 
@@ -241,7 +242,7 @@ NAS 側の export path (例: `/mnt/nas/backups/spirrow-conclair/`) が用意で�
 
 ```bash
 # /etc/systemd/system/spirrow-conclair-backup.service の ExecStartPost に追加
-ExecStartPost=/usr/bin/rsync -a --delete /home/sgadmin/services/spirrow/spirrow-conclair/backups/ /mnt/nas/backups/spirrow-conclair/
+ExecStartPost=/usr/bin/rsync -a --delete {{PATH_SERVICES}}/spirrow-conclair/backups/ /mnt/nas/backups/spirrow-conclair/
 
 # あるいは backup.sh 内で BACKUP_DIR=/mnt/nas/... に切替
 ```
@@ -265,14 +266,14 @@ sudo journalctl -u spirrow-conclair.service -n 100 --no-pager
 
 よくある原因:
 - infra-stack 未起動 → `sudo systemctl start infra-stack.service`
-- `.env` の DATABASE_URL 不正 → `/home/sgadmin/services/infra/.env` の `CONCLAIR_APP_PASSWORD` と整合確認
+- `.env` の DATABASE_URL 不正 → `{{PATH_SERVICES_ROOT}}/infra/.env` の `CONCLAIR_APP_PASSWORD` と整合確認
 - alembic migration エラー → 手動で `.venv/bin/alembic upgrade head` を実行
 
 ### DB に直接アクセスしたい
 
 ```bash
 docker exec -it infra-postgres psql -U conclair_app -d conclair
-# パスワードが必要な場合: PGPASSWORD=$(grep CONCLAIR_APP_PASSWORD /home/sgadmin/services/infra/.env | cut -d= -f2)
+# パスワードが必要な場合: PGPASSWORD=$(grep CONCLAIR_APP_PASSWORD {{PATH_SERVICES_ROOT}}/infra/.env | cut -d= -f2)
 ```
 
 ### infra-postgres / infra-redis のログ
