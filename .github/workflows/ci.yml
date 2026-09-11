@@ -23,10 +23,10 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     env:
-      # The unit suite instantiates Settings (which requires DATABASE_URL)
-      # without ever connecting; the integration suite overrides this with
-      # the container's real URL.
-      DATABASE_URL: postgresql+asyncpg://unused:unused@127.0.0.1:5432/unused
+      # The unit step below is `bash .mindwire-gate`, which carries no --python
+      # flag (it must run unchanged on the loop host). uv reads UV_PYTHON, so
+      # this is what keeps the unit suite on both matrix interpreters.
+      UV_PYTHON: ${{ matrix.python-version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
       - name: Unit tests
-        run: uv run --python ${{ matrix.python-version }} pytest tests/unit -q
+        run: bash .mindwire-gate
 
       - name: Integration tests (testcontainers postgres:16)
         run: uv run --python ${{ matrix.python-version }} pytest tests/integration -q -m "not perf"
@@ -60,9 +60,6 @@ jobs:
     # A measurement job must not be able to hold CI hostage: if it has not
     # produced its numbers by here, the log's per-phase timings say why.
     timeout-minutes: 25
-
-    env:
-      DATABASE_URL: postgresql+asyncpg://unused:unused@127.0.0.1:5432/unused
 
     steps:
       - uses: actions/checkout@v4

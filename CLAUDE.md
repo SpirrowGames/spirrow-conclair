@@ -387,6 +387,8 @@ tests/integration/ # 153 cases + 2 perf, testcontainers postgres:16
 
 実行: `.venv/bin/pytest tests/` (両方) / `pytest tests/unit/` (高速のみ) / `pytest tests/integration/` (DB 必要)。
 
+green の定義は `.mindwire-gate` 1 本（CI の unit step も implementer もこれを実行する）。**コマンドをここに複写しない** — 二箇所になった時点で drift する。
+
 ## 起動
 
 systemd:
