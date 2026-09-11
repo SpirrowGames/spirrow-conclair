@@ -427,7 +427,7 @@ Drive 原本（`1k6MzqdGO5tDXw1UN-biqeH2q6z4d81vPSvYslv1XECw`）の移行。
 ### 「引き渡し先」は 4 ヶ月実行されていない
 
 末尾の引き渡し指示 —— spirrow-voxelworld の `Docs/percell-lod/chatroom/README.md` を本文で置き換えて
-push する —— は**実行されていない**。`Spirrow-VoxelWorld` の git 履歴で
+push する —— は**実行されていない**。`spirrow-voxelworld` の git 履歴で
 `git log --all --diff-filter=A -- 'Docs/percell-lod/chatroom/*'` は空で、そのディレクトリは
 **一度も commit されたことがない**。
 
