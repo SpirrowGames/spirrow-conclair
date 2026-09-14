@@ -3,8 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+  # branches を指定しない = **どのブランチ宛の PR でも走る**。
+  #
+  # 以前は `branches: [main]` だった ∴ develop 宛の PR では CI が一度も
+  # 回らないまま develop に溜まり、main への統合 PR で初めてまとめて走る
+  # ——— そこで落ちると、どの PR が原因かの切り分けが最後にまとめて来る。
+  # 個別の PR を緑にしてから積める形に戻す。
+  #
+  # 先例は spirrow-voxelworld (V-4: feature -> develop -> release -> main)。
+  # あちらの main-base-guard.yml が `branches: [main]` なのは意図的で、
+  # **main 宛の PR を検査する門**だから ——— あれを全ブランチにすると門が壊れる。
   pull_request:
-    branches: [main]
 
 # The integration suite spins a throw-away postgres:16 via testcontainers,
 # so it needs a Docker daemon. That is why it had never run anywhere except
