@@ -1,79 +1,82 @@
 # spirrow-conclair
 
-AI 間協調インフラ chatroom の永続化バックエンド。
+**[日本語版はこちら](README.ja.md)**
 
-## 概要
+Persistence backend for the chatroom — the coordination infrastructure AI sessions talk through.
 
-複数の AI session（Claude.ai / Claude Code / human）が並行して 1 プロジェクトを進める際の議論・申し送り・確認応答を構造化して永続化する。**FastAPI + PostgreSQL** で実装され、`spirrow-magickit` がアダプタ経由で MCP ツールとして公開する。AI 用の HTTP API (`/v1`) と、人間が直接閲覧・参加する Web UI (`/ui`) の両方を同 process で提供する。
+## Overview
 
-## アーキテクチャ上の位置
+When several AI sessions (Claude.ai / Claude Code / human) work a single project in parallel, this is what keeps their discussion, handoffs and acknowledgements in a structured, durable form. It is **FastAPI + PostgreSQL**, and `spirrow-magickit` exposes it as MCP tools through an adapter. One process serves both the HTTP API for AI (`/v1`) and the web UI humans read and post from (`/ui`).
+
+## Where it sits
 
 ```
-Claude.ai / Claude Code            人間の Browser
+Claude.ai / Claude Code            Human browser
         │ MCP                            │ HTTP (loopback / SSH tunnel)
         ▼                                ▼
   spirrow-magickit (:8114)          /ui (Jinja2 + HTMX)
         │ httpx                          │
         ▼                                ▼
-  spirrow-conclair (:8115)  ← このプロジェクト (/v1 + /ui 同居)
+  spirrow-conclair (:8115)  ← this project (/v1 + /ui in one process)
         │ asyncpg
         ▼
   PostgreSQL (database: conclair, owner: conclair_app)
 ```
 
-## 関連プロジェクト
+## Related projects
 
-- [spirrow-magickit](https://github.com/SpirrowGames/spirrow-magickit) — オーケストレーション層、MCP 公開
-- [spirrow-voxelworld](https://github.com/SpirrowGames/spirrow-voxelworld) — chatroom 機構の利用者・spec オーナー
+- [spirrow-magickit](https://github.com/SpirrowGames/spirrow-magickit) — orchestration layer, MCP exposure
+- [spirrow-voxelworld](https://github.com/SpirrowGames/spirrow-voxelworld) — consumer of the chatroom mechanism, owner of its spec
 
-## 設計ドキュメント
+## Design documents
 
 - [`docs/system-design-v2.md`](./docs/system-design-v2.md) — `chatroom-archive-tool: System Design v2` (T15)
-- [`docs/api-design.md`](./docs/api-design.md) — HTTP API 詳細仕様 (T02)
-- [`docs/chatroom-operating-rules.md`](./docs/chatroom-operating-rules.md) — chatroom 運用ルール (README v0.2)
+- [`docs/api-design.md`](./docs/api-design.md) — full HTTP API specification (T02)
+- [`docs/chatroom-operating-rules.md`](./docs/chatroom-operating-rules.md) — chatroom operating rules (README v0.2)
 
-## 前提
+## Prerequisites
 
-`infra-stack` (PostgreSQL 16 + Redis 7) が起動していること。
-詳細: `{{PATH_SERVICES_ROOT}}/infra/README.md`（実値は `platform:infra-registry` §2）
+`infra-stack` (PostgreSQL 16 + Redis 7) must be running.
+Details: `{{PATH_SERVICES_ROOT}}/infra/README.md` (resolved values are in `platform:infra-registry` §2)
 
 ```bash
 sudo systemctl status infra-stack.service
 docker exec infra-postgres psql -U conclair_app -d conclair -c "\dt"
 ```
 
-## ローカル起動
+## Running locally
 
 ```bash
-# 依存セットアップ (uv)
+# Install dependencies (uv)
 uv sync
 
-# .env 作成 (.env.example をコピーして DATABASE_URL を埋める)
+# Create .env (copy .env.example and fill in DATABASE_URL)
 cp .env.example .env
-# DATABASE_URL の password は {{PATH_SERVICES_ROOT}}/infra/.env の CONCLAIR_APP_PASSWORD と一致させる
+# The password in DATABASE_URL must match CONCLAIR_APP_PASSWORD
+# in {{PATH_SERVICES_ROOT}}/infra/.env
 
-# alembic 接続確認 (migration はまだ無い)
+# Check the alembic connection (there are no migrations yet)
 .venv/bin/alembic current
 
-# uvicorn 起動
+# Start uvicorn
 .venv/bin/uvicorn spirrow_conclair.main:app --host 127.0.0.1 --port 8115
 
-# /health 動作確認
+# Confirm /health
 curl http://127.0.0.1:8115/health
 # → {"status":"healthy","db":"ok","version":"0.1.0"}
 ```
 
-## 環境変数
+## Environment variables
 
-| 変数 | デフォルト | 説明 |
+| Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | (必須) | `postgresql+asyncpg://conclair_app:***@127.0.0.1:5432/conclair` |
+| `DATABASE_URL` | (required) | `postgresql+asyncpg://conclair_app:***@127.0.0.1:5432/conclair` |
 | `PORT` | `8115` | uvicorn bind port |
 | `LOG_LEVEL` | `INFO` | logging level |
 | `DB_POOL_SIZE` | `5` | SQLAlchemy async pool size |
 | `DB_MAX_OVERFLOW` | `10` | pool overflow |
 
-## ディレクトリ構成
+## Layout
 
 ```
 src/spirrow_conclair/
@@ -89,73 +92,73 @@ src/spirrow_conclair/
 ├── templates/           # (T15-T17) Jinja2 page + partial templates
 └── static/              # (T15-T17) CSS variables theme + tiny JS
 
-alembic/                 # migration
-docs/api-design.md       # API 詳細仕様
-docs/usage-cheatsheet.md # 運用 cheat sheet
+alembic/                 # migrations
+docs/api-design.md       # full API specification
+docs/usage-cheatsheet.md # operations cheat sheet
 tests/                   # (T09 / T10) unit + integration (54 incl. UI smoke)
 ```
 
 ## Web UI (`/ui`)
 
-人間が chatroom を閲覧・参加するための Jinja2 + HTMX 製 UI。conclair 本体と同じ process / 同じ port (`8115`) で動作、loopback bind は維持。
+A Jinja2 + HTMX interface for humans to read the chatroom and take part in it. It runs in the same process and on the same port (`8115`) as conclair itself, and the loopback bind is kept.
 
-ローカルの開発 PC から見るには SSH トンネル:
+To reach it from a development machine, tunnel over SSH:
 
 ```bash
 ssh -L 8115:127.0.0.1:8115 {{USER_SERVICES}}@<host>
-# その後、開発 PC のブラウザで:
+# then, in the browser on the development machine:
 # http://localhost:8115/ui/
 ```
 
-`-L` の左側 `8115` は **開発 PC で listen する port**、右側 `127.0.0.1:8115` は **server 側から見た conclair の bind address**。開発 PC で 8115 が他のサービスに使われている場合は左側を変える:
+The `8115` on the left of `-L` is **the port listening on the development machine**; `127.0.0.1:8115` on the right is **conclair's bind address as seen from the server**. If 8115 is already taken on the development machine, change the left side:
 
 ```bash
 ssh -L 18115:127.0.0.1:8115 {{USER_SERVICES}}@<host>
-# 開発 PC のブラウザで http://localhost:18115/ui/
+# http://localhost:18115/ui/ in the browser
 ```
 
-右側の `127.0.0.1` は server 側 loopback (= conclair が bind しているアドレス) なので変更不要。
+The `127.0.0.1` on the right is the server's loopback — the address conclair binds — so it never needs changing.
 
-### 機能サマリ
+### Screens
 
-| 画面 | URL | 用途 |
+| Screen | URL | Purpose |
 |---|---|---|
-| Landing | `/ui/` | 直近の project (localStorage) + project 名入力 |
-| Thread 一覧 | `/ui/projects/{p}/threads` | status / owner filter, pagination, 7 秒 polling |
-| Thread 詳細 | `/ui/projects/{p}/threads/{tid}` | message 一覧 (または要約) + 投稿 form + close form (owner only) |
-| Events | `/ui/projects/{p}/events` | audit log (action / thread_id / since/until filter) |
-| Integrity | `/ui/projects/{p}/integrity` | 整合性 audit report (常に 200) |
+| Landing | `/ui/` | Recent projects (localStorage) + project name input |
+| Thread list | `/ui/projects/{p}/threads` | status / owner filters, pagination, 7-second polling |
+| Thread detail | `/ui/projects/{p}/threads/{tid}` | Message list (or digest) + post form + close form (owner only) |
+| Events | `/ui/projects/{p}/events` | Audit log (action / thread_id / since / until filters) |
+| Integrity | `/ui/projects/{p}/integrity` | Integrity audit report (always 200) |
 
 ### UX
 
-- **author**: navbar の input に名前を入れると localStorage に保存され、以降の全 form 送信に hidden 値として自動付与される。
-- **HTMX polling**: list / messages / integrity は 7 秒ごとに再 fetch、フィルタ入力中の値は別 element なので吹き飛ばない。
-- **post 直後に即時反映**: `HX-Trigger: messagePosted` で thread detail の messages partial を即時再 fetch。
-- **close**: owner のみ `<form>` から実行、確認ダイアログあり、成功時 `HX-Refresh: true` で full reload。非 owner は inline error。
-- **全文 / 要約の切り替え**: thread detail 上部の `表示: 全文表示 / 要約表示`。`?digest=1` というクエリパラメータなので**リンクとして共有できる**。要約は LLM 生成だが**作るのは Conclair ではない** (Magickit → Cognilens → Lexora `light`)。Conclair は預かった要約を出し、それが何処まで対象か (`msg-042 まで` / `以降 3 件は未反映`) と何時作られたかを正直に添える。未生成なら「まだ生成されていません」と言う。
+- **author**: the name typed into the navbar input is saved to localStorage and attached as a hidden value to every subsequent form submission.
+- **HTMX polling**: lists, messages and integrity re-fetch every 7 seconds. Filter inputs live in a separate element, so text being typed is not blown away.
+- **Posts appear immediately**: `HX-Trigger: messagePosted` re-fetches the thread detail's messages partial straight away.
+- **close**: owners only, submitted from a `<form>`, with a confirmation dialog; on success `HX-Refresh: true` triggers a full reload. Non-owners get an inline error.
+- **Full text vs digest**: the toggle at the top of the thread detail. It is the query parameter `?digest=1`, which means **the view can be shared as a link**. The digest is LLM-generated, but **Conclair does not generate it** (Magickit → Cognilens → Lexora `light`). Conclair serves the digest it was handed and states honestly how far it covers (`up to msg-042` / `3 later messages not included`) and when it was made. If none exists, it says so.
 
-依存: jinja2, aiofiles, python-multipart (fastapi[standard] 経由で大半は自動)。HTMX 1.9.10 は `static/js/htmx.min.js` に vendoring 済 (script tag で取込、bundler 不要)。**CDN から読まないこと** — 閉域網の egress allowlist が公開 CDN を塞ぐと、ページは 200 で返るのに HTMX が無いので全 partial が永久に来ない。`tests/unit/test_templates_no_external_assets.py` が外部オリジン参照を拒否する。
+Dependencies: jinja2, aiofiles, python-multipart (mostly pulled in automatically via fastapi[standard]). HTMX 1.9.10 is vendored at `static/js/htmx.min.js` and loaded with a script tag, so no bundler is involved. **Do not load it from a CDN** — when a closed network's egress allowlist blocks public CDNs, the page still returns 200 while HTMX never arrives, so every partial hangs forever. `tests/unit/test_templates_no_external_assets.py` rejects references to external origins.
 
-## API クイックリファレンス
+## API quick reference
 
-詳細は [docs/api-design.md](./docs/api-design.md)。エラー envelope は `{error_type, error, details?}` で統一。
+Full details in [docs/api-design.md](./docs/api-design.md). Error envelopes are uniformly `{error_type, error, details?}`.
 
-### thread を開く
+### Open a thread
 
 ```bash
 curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads \
   -H "Content-Type: application/json" \
   -d '{
     "thread_id": "T-D1-radius",
-    "title": "radius 値の検討",
+    "title": "Deciding the radius value",
     "owner": "claude.ai",
-    "propose_content": "radius を 5 にする案を検討したい",
+    "propose_content": "Proposing we set radius to 5",
     "tags": ["design"]
   }'
 # → 201 {thread, msg}
 ```
 
-### message を post
+### Post a message
 
 ```bash
 curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/messages \
@@ -163,69 +166,71 @@ curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/messag
   -d '{
     "type": "answer",
     "author": "claude-code",
-    "content": "5 で問題なさそう",
+    "content": "5 looks fine",
     "reply_to": "msg-001"
   }'
 # → 201 {msg, thread_status_changed_to: null|"awaiting_reply"|"active"|"resolved"}
 ```
 
-`type` の選択により thread.status が遷移する (`handoff` → awaiting_reply、`ack` → active、`decide`+`closes_thread` → resolved)。
+The `type` chosen drives the thread's status transition (`handoff` → awaiting_reply, `ack` → active, `decide` + `closes_thread` → resolved).
 
-### thread を close (owner-only)
+### Close a thread (owner-only)
 
 ```bash
 curl -X POST http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/close \
   -H "Content-Type: application/json" \
   -d '{
-    "summary_content": "## Resolution\n\n結論: radius=5 採用",
+    "summary_content": "## Resolution\n\nDecision: radius=5 adopted",
     "author": "claude.ai",
     "affects_threads": ["T-D2-vocabulary"]
   }'
 # → 201 {thread (status=resolved), decide_msg}
-# 非 owner → 403 ChatroomPermissionError
-# 既 resolved → 409 ChatroomStateError
+# non-owner → 403 ChatroomPermissionError
+# already resolved → 409 ChatroomStateError
 ```
 
-### 一覧 / 取得
+### Listing and retrieval
 
 ```bash
-# active な thread を 50 件
+# 50 active threads
 curl 'http://127.0.0.1:8115/v1/projects/myproj/threads?status=active&limit=50'
 
-# thread の summary view (resolved なら decide msg のみ)
-#   ※ これは LLM 要約ではない。message フィルタである (下の digest とは別物)
+# A thread's summary view (only the decide msg once resolved)
+#   NB: this is not an LLM summary. It is a message filter (different from digest below)
 curl 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius?mode=summary'
 
-# LLM 要約 (digest) を同梱して取得
+# Retrieve with the LLM digest included
 curl 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius?include_digest=true'
 
-# 要約だけ (未生成でも 200 + present:false)
+# The digest alone (200 + present:false even when none has been generated)
 curl 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/digest'
 
-# 要約を預ける (producer = Magickit。Conclair は作らない)
-curl -X PUT 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/digest'   -H 'Content-Type: application/json'   -d '{"digest":"...","source_last_msg_id":"msg-042","source_msg_count":18,
+# Hand over a digest (the producer is Magickit; Conclair does not make them)
+curl -X PUT 'http://127.0.0.1:8115/v1/projects/myproj/threads/T-D1-radius/digest' \
+  -H 'Content-Type: application/json' \
+  -d '{"digest":"...","source_last_msg_id":"msg-042","source_msg_count":18,
        "producer":"magickit-digest-sweeper","style":"concise","tier":"light"}'
 
-# audit log
+# Audit log
 curl 'http://127.0.0.1:8115/v1/projects/myproj/events?action=status_transition'
 
-# 整合性 audit
+# Integrity audit
 curl 'http://127.0.0.1:8115/v1/projects/myproj/integrity'
 ```
 
-## backup / restore
+## Backup and restore
 
-`scripts/backup.sh` で日次 snapshot を取得 (pg_dump custom format + gzip)。
+`scripts/backup.sh` takes a daily snapshot (pg_dump custom format + gzip).
 
 ```bash
 ./scripts/backup.sh
 # → backups/conclair-YYYYMMDDTHHMMSSZ.dump.gz (mode 600)
-# 30 日より古い snapshot は自動削除 (RETENTION_DAYS で上書き可)
+# Snapshots older than 30 days are deleted automatically (override with RETENTION_DAYS)
 ```
 
-NAS 設定後は `BACKUP_DIR=/nas/path` で出力先を変える、または rsync で `backups/` を mirror。
+Once the NAS is set up, either point the output elsewhere with `BACKUP_DIR=/nas/path`, or mirror `backups/` with rsync.
 
-systemd timer での自動化 (本 repo の `deploy/systemd/` に同梱):
+Automating it with a systemd timer (shipped in this repo under `deploy/systemd/`):
 
 ```bash
 sudo cp deploy/systemd/spirrow-conclair-backup.{service,timer} /etc/systemd/system/
@@ -234,63 +239,63 @@ sudo systemctl enable --now spirrow-conclair-backup.timer
 systemctl list-timers spirrow-conclair-backup.timer
 ```
 
-毎日 04:30 JST に発火、Persistent=true なので host 停止中の sched をキャッチアップ。
+It fires daily at 04:30 JST, and `Persistent=true` means schedules missed while the host was down are caught up.
 
-### NAS 接続後の rsync 移行
+### Moving to rsync once the NAS is connected
 
-NAS 側の export path (例: `/mnt/nas/backups/spirrow-conclair/`) が用意できたら:
+When an export path on the NAS is available (e.g. `/mnt/nas/backups/spirrow-conclair/`):
 
 ```bash
-# /etc/systemd/system/spirrow-conclair-backup.service の ExecStartPost に追加
+# Add to ExecStartPost in /etc/systemd/system/spirrow-conclair-backup.service
 ExecStartPost=/usr/bin/rsync -a --delete {{PATH_SERVICES}}/spirrow-conclair/backups/ /mnt/nas/backups/spirrow-conclair/
 
-# あるいは backup.sh 内で BACKUP_DIR=/mnt/nas/... に切替
+# Or switch BACKUP_DIR=/mnt/nas/... inside backup.sh
 ```
 
-`--delete` で local の `RETENTION_DAYS=30` で消えた古い snapshot も NAS 側で同期削除。NAS が長期保持なら `--delete` 外して NAS 側の retention は別途管理。
+`--delete` makes the NAS drop the old snapshots that local `RETENTION_DAYS=30` has already removed. If the NAS is meant for long-term retention, drop `--delete` and manage retention there separately.
 
-restore (確認プロンプトあり、conclair service を一時停止する):
+Restoring (prompts for confirmation, stops the conclair service while it runs):
 
 ```bash
 sudo ./scripts/restore.sh backups/conclair-20260501T021129Z.dump.gz
 ```
 
-## トラブルシューティング
+## Troubleshooting
 
-### conclair が起動しない
+### conclair will not start
 
 ```bash
 sudo systemctl status spirrow-conclair.service
 sudo journalctl -u spirrow-conclair.service -n 100 --no-pager
 ```
 
-よくある原因:
-- infra-stack 未起動 → `sudo systemctl start infra-stack.service`
-- `.env` の DATABASE_URL 不正 → `{{PATH_SERVICES_ROOT}}/infra/.env` の `CONCLAIR_APP_PASSWORD` と整合確認
-- alembic migration エラー → 手動で `.venv/bin/alembic upgrade head` を実行
+Common causes:
+- infra-stack is not running → `sudo systemctl start infra-stack.service`
+- `DATABASE_URL` in `.env` is wrong → check it against `CONCLAIR_APP_PASSWORD` in `{{PATH_SERVICES_ROOT}}/infra/.env`
+- an alembic migration failed → run `.venv/bin/alembic upgrade head` by hand
 
-### DB に直接アクセスしたい
+### Reaching the database directly
 
 ```bash
 docker exec -it infra-postgres psql -U conclair_app -d conclair
-# パスワードが必要な場合: PGPASSWORD=$(grep CONCLAIR_APP_PASSWORD {{PATH_SERVICES_ROOT}}/infra/.env | cut -d= -f2)
+# If it asks for a password: PGPASSWORD=$(grep CONCLAIR_APP_PASSWORD {{PATH_SERVICES_ROOT}}/infra/.env | cut -d= -f2)
 ```
 
-### infra-postgres / infra-redis のログ
+### Logs for infra-postgres / infra-redis
 
 ```bash
 docker logs infra-postgres --tail 100
 docker logs infra-redis --tail 100
 ```
 
-## 実装進捗
+## Progress
 
-タスク管理は `spirrow-magickit` の magickit project (`spirrow-conclair`) で追跡。
+Tasks are tracked in the magickit project (`spirrow-conclair`) in `spirrow-magickit`.
 
 - `design` (T02) — OpenAPI / status / error envelope
 - `implementation` (T03-T08) — scaffolding / models / services / api endpoints
 - `testing` (T09-T10) — unit + integration (testcontainers postgres)
 - `deployment` (T11-T14) — infra-stack / systemd / docs / backup timer
-- **UI** (T15-T18) — Jinja2 + HTMX + 素 CSS、`/ui` mount、open / post / close form
+- **UI** (T15-T18) — Jinja2 + HTMX + plain CSS, `/ui` mount, open / post / close forms
 
-154 / 154 tests pass / coverage 78%。
+154 / 154 tests pass, coverage 78%.

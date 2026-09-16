@@ -14,7 +14,7 @@ keywords: [conclair, 運用, systemd, backup, トラブルシュート, digest]
 
 # Operating cheatsheet
 
-最低限ここだけ読めば conclair を運用できることを目指す。詳細は CLAUDE.md / README.md / docs/api-design.md。
+最低限ここだけ読めば conclair を運用できることを目指す。詳細は CLAUDE.md / README.ja.md / docs/api-design.md。
 
 ## 何のサービス?
 
@@ -116,7 +116,7 @@ ssh -L 8115:127.0.0.1:8115 {{USER_SERVICES}}@<host>
 
 ## 直接 HTTP で叩く (debug / 緊急時)
 
-127.0.0.1 binding なので host 内から curl 可能。例は README.md の "API クイックリファレンス" 参照。
+127.0.0.1 binding なので host 内から curl 可能。例は README.ja.md の "API クイックリファレンス" 参照。
 
 ## DB に直接潜る
 
