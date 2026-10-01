@@ -548,3 +548,153 @@ async def test_the_listing_page_does_not_touch_messages(
     assert "messages" not in page_plan
     assert "Aggregate" not in page_plan
     assert "threads" in page_plan
+
+
+# --- GET /unread: where the time goes (measurement only) -------------------
+#
+# `api/read_cursor.py` builds the inbox around a *correlated* per-thread
+# unread count and uses it in the SELECT list, the WHERE (`> 0`) and the
+# ORDER BY. Its own comment states the premise ("a few hundred rows of
+# `messages` per thread keeps this cheap") and the prescription if profiling
+# flags it ("the rewrite is to a lateral join"). The listing test above
+# already times GET /unread and saw it run in seconds at 100x; nothing yet
+# says *why*. This test produces the breakdown and the plans, and changes
+# nothing in `src/`: no candidate fix (lateral join / expression index /
+# stored msg_num) is chosen before these numbers exist.
+#
+# The statements EXPLAINed below are captured from the route as it runs
+# (SQLAlchemy `before_execute` on the app's engine), so the plans belong
+# to production SQL with its real bound values -- not to a transcription
+# that could drift from `src/`.
+
+UNREAD_IDENTITY = "reader"
+
+# Two reader states. The cursor value only moves the `msg_num > cursor`
+# filter, which is an unindexed expression -- so if the count still costs
+# the same for a reader who is caught up, the per-thread scan is the cost,
+# not the number of unread rows.
+_NO_CURSORS = "no cursors (every msg unread)"
+_CAUGHT_UP = "caught up on 9 in 10 threads"
+
+# A cursor at each thread's latest msg for 9 threads in 10; the 10th has
+# no cursor and so stays wholly unread.
+_SEED_CAUGHT_UP_CURSORS = text(
+    """
+    INSERT INTO actor_read_cursors (project, identity_name, thread_id,
+                                    last_read_msg_id, updated_at)
+    SELECT t.project,
+           :identity,
+           t.thread_id,
+           'msg-' || lpad(t.last_msg_num::text,
+                          greatest(3, length(t.last_msg_num::text)), '0'),
+           TIMESTAMPTZ '2026-06-01 00:00:00+00'
+      FROM threads t
+     WHERE t.project = :p
+       AND t.last_msg_num IS NOT NULL
+       AND CAST(SUBSTRING(t.thread_id FROM 3) AS BIGINT) % 10 <> 0
+    """
+)
+
+UNREAD_SCALES = SCALES[:2]  # today, and the 100x point GET /unread was seen slow at
+
+
+async def test_unread_inbox_cost_breakdown(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """Time and EXPLAIN each statement GET /unread issues, per scale and reader state.
+
+    Reported, not asserted: this is the measuring step that has to come
+    before choosing a rewrite. The only assertion is that the route issued
+    the two statements the breakdown is labelled with (total count, page);
+    if that ever changes, the labels below would silently lie.
+    """
+    from sqlalchemy import event
+
+    from spirrow_conclair import db as app_db
+
+    # The client fixture has run init_db(), so the app's engine exists.
+    assert app_db._engine is not None
+    captured: list[ClauseElement] = []
+
+    def _capture(conn, clauseelement, multiparams, params, execution_options):  # type: ignore[no-untyped-def]
+        captured.append(clauseelement)
+
+    async def _http_unread() -> object:
+        r = await client.get(
+            f"/v1/projects/{PROJECT}/unread",
+            params={"identity_name": UNREAD_IDENTITY, "limit": 100},
+        )
+        assert r.status_code == 200, r.text
+        return r
+
+    under_test = _Seeded()
+    summary: list[str] = []
+
+    for scale in UNREAD_SCALES:
+        _log(f"=== /unread scale: {scale.name} ===")
+        await _grow_project(
+            db_session,
+            under_test,
+            project=PROJECT,
+            n_threads=scale.n_threads,
+            n_msgs=scale.n_msgs,
+        )
+
+        for state in (_NO_CURSORS, _CAUGHT_UP):
+            await db_session.execute(
+                text("DELETE FROM actor_read_cursors WHERE project = :p"),
+                {"p": PROJECT},
+            )
+            if state == _CAUGHT_UP:
+                await db_session.execute(
+                    _SEED_CAUGHT_UP_CURSORS,
+                    {"p": PROJECT, "identity": UNREAD_IDENTITY},
+                )
+            await db_session.execute(text("ANALYZE actor_read_cursors"))
+            await db_session.commit()
+
+            label = f"{scale.name} / {state}"
+            over_http = await _time(f"GET /unread [{state}]", _http_unread)
+
+            # Capture exactly what one request sends.
+            captured.clear()
+            event.listen(app_db._engine.sync_engine, "before_execute", _capture)
+            try:
+                response = await _http_unread()
+            finally:
+                event.remove(app_db._engine.sync_engine, "before_execute", _capture)
+            body = response.json()  # type: ignore[attr-defined]
+            statements = list(captured)
+            assert len(statements) == 2, (
+                f"GET /unread issued {len(statements)} statements; the breakdown "
+                "below is labelled for exactly two (total count, then page)"
+            )
+            count_stmt, page_stmt = statements
+
+            count_t = await _time(
+                f"  total-count statement [{state}]",
+                lambda s=count_stmt: db_session.execute(s),  # type: ignore[misc]
+            )
+            page_t = await _time(
+                f"  page statement [{state}]",
+                lambda s=page_stmt: db_session.execute(s),  # type: ignore[misc]
+            )
+
+            count_plan = await _explain(db_session, count_stmt)
+            page_plan = await _explain(db_session, page_stmt)
+            print(f"\n=== EXPLAIN /unread total count -- {label} ===\n{count_plan}", flush=True)
+            print(f"\n=== EXPLAIN /unread page -- {label} ===\n{page_plan}", flush=True)
+
+            summary.extend(
+                [
+                    f"=== /unread: {label} ===",
+                    f"  inbox total {body['total']}, page {len(body['items'])} rows",
+                    f"  {over_http}",
+                    f"  {count_t}",
+                    f"  {page_t}",
+                    f"  SubPlan nodes: count stmt {count_plan.count('SubPlan')}, "
+                    f"page stmt {page_plan.count('SubPlan')}",
+                ]
+            )
+
+    print("\n" + "\n".join(summary), flush=True)
