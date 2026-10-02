@@ -112,12 +112,17 @@ class Message(Base):
         # cursor -- is answerable from the index, so it is an index-only
         # scan rather than a heap fetch per msg. The expression must stay
         # identical to `services.thread_rollup.msg_num_expr` or the planner
-        # will not use it. Migration 0009 says why it exists.
+        # will not use it. `INCLUDE (msg_id)` is what makes it index-only:
+        # the planner counts a query as covered only when every *column* it
+        # reads is in the index, and an expression over `msg_id` does not
+        # put `msg_id` there (measured on #31: without it, a plain index
+        # scan). Migration 0009 says why it exists.
         Index(
             "idx_messages_thread_num",
             text("project"),
             text("thread_id"),
             text("(CAST(SUBSTRING(msg_id FROM 5) AS BIGINT))"),
+            postgresql_include=["msg_id"],
         ),
         Index("idx_messages_type", "project", "type"),
     )

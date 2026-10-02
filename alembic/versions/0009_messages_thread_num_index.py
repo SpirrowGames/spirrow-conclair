@@ -15,6 +15,13 @@ With the expression as the index's third key, the count's whole
 predicate is answered by the index -- an index-only scan that touches only
 the rows past the cursor.
 
+**``INCLUDE (msg_id)`` is load-bearing.** Postgres treats a query as
+index-only-capable only when every *column* it reads is stored in the
+index; an expression over ``msg_id`` does not count as storing
+``msg_id``. Without the INCLUDE, #31's first stage-3 run (CI ``perf``,
+run 36959317317) planned a plain ``Index Scan`` on this index -- the
+heap fetch per msg stayed.
+
 **The expression must stay identical to ``msg_num_expr``.** Postgres
 matches an expression index only against the same expression, which is
 also why ``msg_num_expr`` renders its ``5`` inline rather than as a bound
@@ -42,7 +49,8 @@ depends_on = None
 def upgrade() -> None:
     op.execute(
         "CREATE INDEX idx_messages_thread_num "
-        "ON messages (project, thread_id, (CAST(SUBSTRING(msg_id FROM 5) AS BIGINT)))"
+        "ON messages (project, thread_id, (CAST(SUBSTRING(msg_id FROM 5) AS BIGINT))) "
+        "INCLUDE (msg_id)"
     )
 
 
