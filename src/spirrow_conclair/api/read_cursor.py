@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, status
-from sqlalchemy import BigInteger, cast, func, nulls_last, select
+from sqlalchemy import BigInteger, cast, func, nulls_last, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from spirrow_conclair.db import SessionDep
@@ -280,6 +280,25 @@ async def list_unread(
     # subsumes the previous "cursor NULL OR latest_num > cursor_num"
     # check (both fall out of "more msgs in this thread than the
     # cursor records").
+    #
+    # In front of it sits a cheap pre-filter on the stored activity key:
+    # a thread whose newest msg is not past the cursor cannot have an
+    # unread msg, so it never reaches the per-thread count. This is a
+    # narrowing only, never the membership rule -- `unread_count > 0`
+    # stays the contract, so a key that is too *high* (a deleted msg, a
+    # hand repair) costs one wasted count and still cannot put a
+    # zero-unread row in the inbox. A key that is too *low* would hide a
+    # thread; the two write sites assign it in the msg's own transaction
+    # and `stale_activity_key` audits it. A NULL key is let through to the
+    # count rather than read as "no msgs": the integrity audit treats a
+    # NULL on a thread that has msgs as stale, and the ordering below
+    # already decides where such a row goes, so it must stay reachable.
+    base = base.where(
+        or_(
+            Thread.last_msg_num.is_(None),
+            Thread.last_msg_num > func.coalesce(cursor_num, 0),
+        )
+    )
     base = base.where(unread_count_subq > 0)
 
     total = await session.scalar(

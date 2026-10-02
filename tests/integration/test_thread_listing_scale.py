@@ -639,6 +639,17 @@ async def test_unread_inbox_cost_breakdown(
             n_threads=scale.n_threads,
             n_msgs=scale.n_msgs,
         )
+        # Set the visibility map the way autovacuum would on a live,
+        # append-only `messages` (Postgres >= 13 vacuums on inserts alone).
+        # Without it every index-only scan still visits the heap for each
+        # row -- a cost a freshly bulk-loaded table has and a settled one
+        # does not -- and the plan would understate any index that covers
+        # the count. Applied to every stage of the rewrite alike, so the
+        # per-stage numbers stay comparable. VACUUM refuses to run inside a
+        # transaction block, hence its own autocommit connection.
+        async with app_db._engine.connect() as vac_conn:
+            await vac_conn.execution_options(isolation_level="AUTOCOMMIT")
+            await vac_conn.execute(text("VACUUM (ANALYZE) messages"))
 
         for state in (_NO_CURSORS, _CAUGHT_UP):
             await db_session.execute(
