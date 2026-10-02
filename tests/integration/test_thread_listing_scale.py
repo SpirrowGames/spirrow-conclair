@@ -61,7 +61,7 @@ from dataclasses import dataclass
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import ClauseElement, Executable, func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.ext.compiler import compiles
 
 from spirrow_conclair.api.threads import listing_query
@@ -652,11 +652,14 @@ async def test_unread_inbox_cost_breakdown(
         # the count. Applied to every stage of the rewrite alike, so the
         # per-stage numbers stay comparable. VACUUM refuses to run inside a
         # transaction block, hence an autocommit connection. The option is
-        # set on the engine (`AsyncEngine.execution_options` is synchronous
-        # and returns a new engine on the same pool), so every connection
-        # it hands out is autocommit from the start and nothing depends on
-        # the per-connection API.
-        autocommit = app_db._engine.execution_options(isolation_level="AUTOCOMMIT")
+        # set on the engine the test's own `db_session` is bound to
+        # (`AsyncEngine.execution_options` is synchronous and returns a new
+        # engine on the same pool), so every connection it hands out is
+        # autocommit from the start and nothing depends on the
+        # per-connection API.
+        session_engine = db_session.bind
+        assert isinstance(session_engine, AsyncEngine)
+        autocommit = session_engine.execution_options(isolation_level="AUTOCOMMIT")
         async with autocommit.connect() as vac_conn:
             await vac_conn.execute(text("VACUUM (ANALYZE) messages"))
 

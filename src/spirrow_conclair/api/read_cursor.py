@@ -309,7 +309,12 @@ async def list_unread(
     # hand repair) costs one wasted count and still cannot put a
     # zero-unread row in the inbox. A key that is too *low* would hide a
     # thread; the two write sites assign it in the msg's own transaction
-    # and `stale_activity_key` audits it. A NULL key is let through to the
+    # and `stale_activity_key` audits it. Concurrent posts cannot leave it
+    # low: `post_message_in_session` takes the thread row FOR UPDATE and
+    # then the project's xact-scoped advisory lock before allocating, so
+    # writers to one thread commit one at a time in msg_id order and the
+    # last commit carries the highest number (`open_thread` creates the
+    # row, so it has no competitor). A NULL key is let through to the
     # count rather than read as "no msgs": the integrity audit treats a
     # NULL on a thread that has msgs as stale, and the ordering below
     # already decides where such a row goes, so it must stay reachable.
