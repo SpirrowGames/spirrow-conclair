@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, status
-from sqlalchemy import BigInteger, cast, func, nulls_last, or_, select
+from sqlalchemy import BigInteger, cast, func, nulls_last, or_, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from spirrow_conclair.db import SessionDep
@@ -223,8 +223,8 @@ async def list_unread(
     # across threads in the same project, so per-thread aggregates MUST
     # be derived from rows that match ``messages.thread_id`` -- not from
     # numeric subtraction on the project-wide sequence, which would
-    # count msgs from sibling threads. The per-thread counts below stay
-    # in SQL (one GROUP BY) so the inbox is a single round-trip.
+    # count msgs from sibling threads. The per-thread counts below are
+    # computed in SQL, inside the page query, not assembled in Python.
     msg_num = msg_num_expr()
     cursor_num = cast(
         func.substring(cursor_q.c.last_read_msg_id, 5), BigInteger
@@ -236,23 +236,42 @@ async def list_unread(
     # triage surfaces cannot drift apart. It used to be a GROUP BY over every
     # msg in the project, joined in -- see `services/thread_rollup` for what
     # that cost and why it moved.
-    # Per-thread unread count, *correlated with the cursor*: the count
-    # of msgs in this thread whose numeric msg_id is strictly greater
-    # than the identity's cursor (or all of them when the cursor is
-    # null). Correlated subquery -- a few hundred rows of `messages` per
-    # thread keeps this cheap; if profiling later flags it, the
-    # rewrite is to a lateral join.
-    unread_count_subq = (
-        select(func.count())
+    # Per-thread unread count: the msgs in this thread whose numeric msg_id
+    # is strictly greater than the identity's cursor (all of them when the
+    # cursor is null).
+    #
+    # Its cost is (threads that reach it) x (one evaluation each) x (msgs
+    # scanned per evaluation), and the first two factors are what matter.
+    # Measured before this shape (#30, CI `perf`, 300k msgs / 5k threads,
+    # ~60 msgs per thread -- well under the "few hundred" this comment used
+    # to assume): 636 ms per request, because the count was a correlated
+    # scalar subquery placed in the SELECT list, the WHERE and the ORDER BY,
+    # which Postgres planned as SubPlans and ran up to three times per
+    # thread, for every thread, before LIMIT could apply. Per-thread size
+    # was never the problem; thread count times evaluations was. Hence:
+    #
+    # - one LATERAL join, so the SELECT list, the WHERE and the ORDER BY all
+    #   read the same per-row result (one evaluation per surviving thread);
+    # - the `last_msg_num` pre-filter below, so caught-up threads never get
+    #   counted at all.
+    #
+    # The join is INNER: `count(*)` always yields exactly one row, so outer
+    # and inner are the same rows, and with `unread_count > 0` in the WHERE
+    # INNER is the honest statement of what the row needs.
+    # `tests/integration/test_thread_listing_scale.py::
+    # test_unread_inbox_cost_breakdown` re-measures this and pins the plan
+    # shape; if it reds, the premise above has moved.
+    unread_lateral = (
+        select(func.count().label("unread_count"))
         .select_from(Message)
         .where(
             Message.project == project,
             Message.thread_id == Thread.thread_id,
             msg_num > func.coalesce(cursor_num, 0),
         )
-        .correlate(Thread, cursor_q)
-        .scalar_subquery()
+        .lateral("unread")
     )
+    unread_count = unread_lateral.c.unread_count
 
     base = (
         select(
@@ -263,23 +282,24 @@ async def list_unread(
             Thread.created_at.label("created_at"),
             Thread.last_msg_num.label("latest_num"),
             cursor_q.c.last_read_msg_id.label("last_read_msg_id"),
-            unread_count_subq.label("unread_count"),
+            unread_count.label("unread_count"),
         )
+        .select_from(Thread)
         .join(
             cursor_q,
             cursor_q.c.thread_id == Thread.thread_id,
             isouter=True,
         )
+        .join(unread_lateral, true())
         .where(Thread.project == project)
     )
     if not include_resolved:
         base = base.where(Thread.status != "resolved")
 
-    # Unread filter is now expressed against the corrected per-thread
-    # count: a row is in the inbox iff `unread_count > 0`. This
-    # subsumes the previous "cursor NULL OR latest_num > cursor_num"
-    # check (both fall out of "more msgs in this thread than the
-    # cursor records").
+    # Membership: a row is in the inbox iff `unread_count > 0`, counted from
+    # `messages` (this subsumes the older "cursor NULL OR latest_num >
+    # cursor_num" check). It reads the lateral's output column, so it adds
+    # no evaluation.
     #
     # In front of it sits a cheap pre-filter on the stored activity key:
     # a thread whose newest msg is not past the cursor cannot have an
@@ -299,7 +319,7 @@ async def list_unread(
             Thread.last_msg_num > func.coalesce(cursor_num, 0),
         )
     )
-    base = base.where(unread_count_subq > 0)
+    base = base.where(unread_count > 0)
 
     total = await session.scalar(
         select(func.count()).select_from(base.subquery())
@@ -327,7 +347,7 @@ async def list_unread(
                 # does have unread msgs, i.e. the one row whose rank is
                 # known to be untrustworthy. NULLS FIRST would put exactly
                 # that row at the top of the inbox.
-                unread_count_subq.desc(),
+                unread_count.desc(),
                 nulls_last(Thread.last_msg_num.desc()),
                 Thread.created_at.desc(),
             )
