@@ -652,6 +652,13 @@ async def test_unread_inbox_cost_breakdown(
         # the count. Applied to every stage of the rewrite alike, so the
         # per-stage numbers stay comparable. VACUUM refuses to run inside a
         # transaction block, hence its own autocommit connection.
+        #
+        # `AsyncConnection.execution_options` is a coroutine in SQLAlchemy
+        # 2.0 (locked: 2.0.49): it sets the options on this same connection
+        # and returns `self`, so it is awaited and its result need not be
+        # kept. (The sync `Connection.execution_options` returns a copy;
+        # the async one does not.) Not awaiting it would leave the options
+        # unset and VACUUM inside a transaction.
         async with app_db._engine.connect() as vac_conn:
             await vac_conn.execution_options(isolation_level="AUTOCOMMIT")
             await vac_conn.execute(text("VACUUM (ANALYZE) messages"))
