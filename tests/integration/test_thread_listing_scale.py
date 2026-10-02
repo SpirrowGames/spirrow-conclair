@@ -610,7 +610,8 @@ async def test_unread_inbox_cost_breakdown(
     Timings are reported, not asserted (a shared runner cannot honour a
     latency bound). Asserted: the route issues the two statements the
     breakdown is labelled with (total count, page), and at 100x each plan
-    counts unread msgs through one scan of `messages` and no SubPlan.
+    counts unread msgs through one scan of `messages` and no SubPlan, and
+    that scan is index-only on `idx_messages_thread_num`.
     """
     from sqlalchemy import event
 
@@ -726,6 +727,10 @@ async def test_unread_inbox_cost_breakdown(
                     assert _messages_scans(plan) == 1, (
                         f"{label}: the {which} statement scans `messages` "
                         f"{_messages_scans(plan)} times; one LATERAL count expected\n{plan}"
+                    )
+                    assert "Index Only Scan using idx_messages_thread_num on messages" in plan, (
+                        f"{label}: the {which} statement does not count through "
+                        f"idx_messages_thread_num as an index-only scan\n{plan}"
                     )
 
     print("\n" + "\n".join(summary), flush=True)

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Index, PrimaryKeyConstraint, Text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKeyConstraint,
+    Index,
+    PrimaryKeyConstraint,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -100,5 +107,17 @@ class Message(Base):
             name="messages_next_participant_close_check",
         ),
         Index("idx_messages_thread", "project", "thread_id"),
+        # Covers the inbox's per-thread unread count (`GET /unread`): the
+        # count's whole predicate -- project, thread, msg number past the
+        # cursor -- is answerable from the index, so it is an index-only
+        # scan rather than a heap fetch per msg. The expression must stay
+        # identical to `services.thread_rollup.msg_num_expr` or the planner
+        # will not use it. Migration 0009 says why it exists.
+        Index(
+            "idx_messages_thread_num",
+            text("project"),
+            text("thread_id"),
+            text("(CAST(SUBSTRING(msg_id FROM 5) AS BIGINT))"),
+        ),
         Index("idx_messages_type", "project", "type"),
     )
