@@ -119,8 +119,8 @@ class Message(Base):
         # scan). Migration 0009 says why it exists.
         Index(
             "idx_messages_thread_num",
-            text("project"),
-            text("thread_id"),
+            "project",
+            "thread_id",
             text("(CAST(SUBSTRING(msg_id FROM 5) AS BIGINT))"),
             postgresql_include=["msg_id"],
         ),
