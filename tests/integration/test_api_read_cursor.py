@@ -406,6 +406,39 @@ async def test_unread_never_contains_a_thread_with_no_msgs(
     assert listed[1]["last_activity_at"] is None
 
 
+async def test_unread_ignores_an_activity_key_that_is_too_high(
+    client: AsyncClient,
+    session_factory: async_sessionmaker,
+) -> None:
+    """A stale-high `last_msg_num` must not put a zero-unread thread in the inbox.
+
+    The inbox narrows on `threads.last_msg_num > cursor` before it counts,
+    and that narrowing is cheap only because it trusts a denormalised key.
+    The key is allowed to be *wrong upwards* -- a deleted msg or a hand
+    repair would leave it there, and no write path recomputes it -- so the
+    membership rule stays `unread_count > 0`, counted from `messages`. Raised
+    here by direct UPDATE because the write path cannot produce it.
+    """
+    await _open(client, "p", "T-read")  # msg-001
+    await _open(client, "p", "T-unread")  # msg-002
+    code, _ = await _mark_read(client, "p", "T-read", identity_name="Bohr")
+    assert code == 200
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE threads SET last_msg_num = 999 "
+                "WHERE project = 'p' AND thread_id = 'T-read'"
+            )
+        )
+        await session.commit()
+
+    code, body = await _unread(client, "p", "Bohr")
+
+    assert code == 200, body
+    assert [i["thread_id"] for i in body["items"]] == ["T-unread"]
+    assert body["total"] == 1
+
+
 async def test_unread_excludes_resolved_by_default(client: AsyncClient) -> None:
     await _open(client, "p", "T-1")
     # Close the thread -- alice is the owner.

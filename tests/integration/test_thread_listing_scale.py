@@ -61,7 +61,7 @@ from dataclasses import dataclass
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import ClauseElement, Executable, func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.ext.compiler import compiles
 
 from spirrow_conclair.api.threads import listing_query
@@ -550,17 +550,16 @@ async def test_the_listing_page_does_not_touch_messages(
     assert "threads" in page_plan
 
 
-# --- GET /unread: where the time goes (measurement only) -------------------
+# --- GET /unread: where the time goes -------------------------------------
 #
-# `api/read_cursor.py` builds the inbox around a *correlated* per-thread
-# unread count and uses it in the SELECT list, the WHERE (`> 0`) and the
-# ORDER BY. Its own comment states the premise ("a few hundred rows of
-# `messages` per thread keeps this cheap") and the prescription if profiling
-# flags it ("the rewrite is to a lateral join"). The listing test above
-# already times GET /unread and saw it run in seconds at 100x; nothing yet
-# says *why*. This test produces the breakdown and the plans, and changes
-# nothing in `src/`: no candidate fix (lateral join / expression index /
-# stored msg_num) is chosen before these numbers exist.
+# Introduced (#30) as the measuring step before any rewrite: the inbox then
+# built its per-thread unread count as a correlated scalar subquery used in
+# the SELECT list, the WHERE and the ORDER BY, and at 100x it cost ~0.6 s,
+# because Postgres ran that count up to three times per thread, for every
+# thread, before LIMIT could apply. The rewrite (#31: `last_msg_num`
+# pre-filter, one LATERAL count, expression index) was chosen from those
+# plans. This test keeps reporting the numbers, and at 100x it now also
+# pins the plan shape the rewrite exists to produce.
 #
 # The statements EXPLAINed below are captured from the route as it runs
 # (SQLAlchemy `before_execute` on the app's engine), so the plans belong
@@ -597,16 +596,22 @@ _SEED_CAUGHT_UP_CURSORS = text(
 
 UNREAD_SCALES = SCALES[:2]  # today, and the 100x point GET /unread was seen slow at
 
+def _messages_scans(plan: str) -> int:
+    """Plan nodes that read `messages` (seq, index or index-only scans)."""
+    return sum(1 for line in plan.splitlines() if " on messages" in line)
+
+
 
 async def test_unread_inbox_cost_breakdown(
     db_session: AsyncSession, client: AsyncClient
 ) -> None:
     """Time and EXPLAIN each statement GET /unread issues, per scale and reader state.
 
-    Reported, not asserted: this is the measuring step that has to come
-    before choosing a rewrite. The only assertion is that the route issued
-    the two statements the breakdown is labelled with (total count, page);
-    if that ever changes, the labels below would silently lie.
+    Timings are reported, not asserted (a shared runner cannot honour a
+    latency bound). Asserted: the route issues the two statements the
+    breakdown is labelled with (total count, page), and at 100x each plan
+    counts unread msgs through one scan of `messages` and no SubPlan, and
+    that scan is index-only on `idx_messages_thread_num`.
     """
     from sqlalchemy import event
 
@@ -639,6 +644,24 @@ async def test_unread_inbox_cost_breakdown(
             n_threads=scale.n_threads,
             n_msgs=scale.n_msgs,
         )
+        # Set the visibility map the way autovacuum would on a live,
+        # append-only `messages` (Postgres >= 13 vacuums on inserts alone).
+        # Without it every index-only scan still visits the heap for each
+        # row -- a cost a freshly bulk-loaded table has and a settled one
+        # does not -- and the plan would understate any index that covers
+        # the count. Applied to every stage of the rewrite alike, so the
+        # per-stage numbers stay comparable. VACUUM refuses to run inside a
+        # transaction block, hence an autocommit connection. The option is
+        # set on the engine the test's own `db_session` is bound to
+        # (`AsyncEngine.execution_options` is synchronous and returns a new
+        # engine on the same pool), so every connection it hands out is
+        # autocommit from the start and nothing depends on the
+        # per-connection API.
+        session_engine = db_session.bind
+        assert isinstance(session_engine, AsyncEngine)
+        autocommit = session_engine.execution_options(isolation_level="AUTOCOMMIT")
+        async with autocommit.connect() as vac_conn:
+            await vac_conn.execute(text("VACUUM (ANALYZE) messages"))
 
         for state in (_NO_CURSORS, _CAUGHT_UP):
             await db_session.execute(
@@ -694,7 +717,27 @@ async def test_unread_inbox_cost_breakdown(
                     f"  {page_t}",
                     f"  SubPlan nodes: count stmt {count_plan.count('SubPlan')}, "
                     f"page stmt {page_plan.count('SubPlan')}",
+                    f"  scans of messages: count stmt {_messages_scans(count_plan)}, "
+                    f"page stmt {_messages_scans(page_plan)}",
                 ]
             )
+
+            # The shape the rewrite exists to produce, pinned where it was
+            # measured to matter. Today's scale is reported but not pinned:
+            # at 120 threads the planner may fairly prefer another shape.
+            if scale is UNREAD_SCALES[-1]:
+                for which, plan in (("total count", count_plan), ("page", page_plan)):
+                    assert "SubPlan" not in plan, (
+                        f"{label}: the {which} statement plans the unread count as "
+                        f"a SubPlan again (one evaluation per use, not per row)\n{plan}"
+                    )
+                    assert _messages_scans(plan) == 1, (
+                        f"{label}: the {which} statement scans `messages` "
+                        f"{_messages_scans(plan)} times; one LATERAL count expected\n{plan}"
+                    )
+                    assert "Index Only Scan using idx_messages_thread_num on messages" in plan, (
+                        f"{label}: the {which} statement does not count through "
+                        f"idx_messages_thread_num as an index-only scan\n{plan}"
+                    )
 
     print("\n" + "\n".join(summary), flush=True)

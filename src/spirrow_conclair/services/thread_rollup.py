@@ -49,7 +49,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import BigInteger, ColumnElement, Select, cast, func, select
+from sqlalchemy import BigInteger, ColumnElement, Select, cast, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from spirrow_conclair.models import Message
@@ -61,8 +61,15 @@ def msg_num_expr() -> ColumnElement[int]:
 
     Lexicographic order on the string is wrong (``msg-9 > msg-100``);
     everything that orders or maxes msgs goes through this cast.
+
+    The ``5`` is rendered inline, not as a bound parameter, because this
+    expression is indexed (``idx_messages_thread_num``, migration 0009) and
+    Postgres matches an expression index only against an identical
+    expression: ``substring(msg_id, $1)`` is not ``substring(msg_id, 5)``
+    to a generic plan of a prepared statement, which asyncpg uses. Keep it
+    character-for-character equal to that index.
     """
-    return cast(func.substring(Message.msg_id, 5), BigInteger)
+    return cast(func.substring(Message.msg_id, literal_column("5")), BigInteger)
 
 
 @dataclass(frozen=True)
