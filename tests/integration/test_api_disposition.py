@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -159,6 +160,38 @@ async def test_db_check_refuses_unknown_kind(
     with pytest.raises(IntegrityError) as ei:
         await db_session.flush()
     assert "messages_disposition_shape_check" in str(ei.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{}, [], "done", 1, {"kind": None}, {"trigger": {"arm": "pr", "ref": "r"}}],
+    ids=["empty-object", "array", "string", "number", "null-kind", "no-kind"],
+)
+async def test_db_check_refuses_values_without_a_kind(
+    client: AsyncClient, db_session: AsyncSession, value: Any
+) -> None:
+    # A CHECK passes on NULL, and ->>'kind' is NULL for every one of these;
+    # the predicate must still come out FALSE. (PR-gate on #32.)
+    await _open(client)
+    db_session.add(_row("msg-903", type="report", disposition=value))
+    with pytest.raises(IntegrityError) as ei:
+        await db_session.flush()
+    assert "messages_disposition_shape_check" in str(ei.value)
+
+
+async def test_db_close_check_refuses_kindless_value_on_a_closing_row(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    # Pins the close check on its own: the shape check is dropped for this
+    # session's transaction so only the close predicate decides.
+    await _open(client)
+    await db_session.execute(
+        text("ALTER TABLE messages DROP CONSTRAINT messages_disposition_shape_check")
+    )
+    db_session.add(_row("msg-904", closes_thread="T-1", disposition={}))
+    with pytest.raises(IntegrityError) as ei:
+        await db_session.flush()
+    assert "messages_disposition_close_check" in str(ei.value)
 
 
 async def test_db_check_allows_done_on_a_closing_row(

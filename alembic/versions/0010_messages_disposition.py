@@ -18,6 +18,12 @@ an error. This adds the column and two CHECKs.
   row saying both "closed" and "someone must still be woken" cannot be acted
   on, and ``messages`` is append-only.
 
+**Both predicates are NULL-safe.** A CHECK passes when it evaluates to NULL,
+and ``disposition->>'kind'`` is NULL for ``{}`` and for any non-object value,
+so a bare ``->>'kind' IN (...)`` would accept exactly the malformed values it
+exists to refuse. ``jsonb_typeof(...) = 'object'`` and ``COALESCE(..., '')``
+make those evaluate to FALSE. (PR-gate on #32.)
+
 **Both CHECKs ship with the column.** Every existing row is NULL, and NULL
 satisfies both predicates, so they are true on arrival -- no legacy cohort to
 grandfather, same as 0007.
@@ -58,13 +64,14 @@ def upgrade() -> None:
     op.create_check_constraint(
         SHAPE_CHECK,
         "messages",
-        "disposition IS NULL OR disposition->>'kind' IN ('done', 'blocked_on')",
+        "disposition IS NULL OR (jsonb_typeof(disposition) = 'object' "
+        "AND COALESCE(disposition->>'kind', '') IN ('done', 'blocked_on'))",
     )
     op.create_check_constraint(
         CLOSE_CHECK,
         "messages",
         "closes_thread IS NULL OR disposition IS NULL "
-        "OR disposition->>'kind' = 'done'",
+        "OR COALESCE(disposition->>'kind', '') = 'done'",
     )
 
 

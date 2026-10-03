@@ -117,8 +117,15 @@ class Message(Base):
         # Shape floor for ``disposition``. The full shape (trigger / wake /
         # fallback, extra keys refused) is the pydantic model's; this is the
         # part a writer that bypasses the API cannot get wrong either.
+        #
+        # NULL-safe on purpose. A CHECK passes when its expression is NULL,
+        # and ``->>'kind'`` is NULL for ``{}`` and for any non-object (an
+        # array, a scalar), so the bare ``IN`` let those through. The
+        # ``jsonb_typeof`` guard and the COALESCE make every such value
+        # evaluate to FALSE. (PR-gate on #32.)
         CheckConstraint(
-            "disposition IS NULL OR disposition->>'kind' IN ('done', 'blocked_on')",
+            "disposition IS NULL OR (jsonb_typeof(disposition) = 'object' "
+            "AND COALESCE(disposition->>'kind', '') IN ('done', 'blocked_on'))",
             name="messages_disposition_shape_check",
         ),
         # Same reasoning as the next_participant check above: a row that
@@ -127,8 +134,10 @@ class Message(Base):
         # nothing. Mirrored by ``services.integrity.assert_disposition_close_rule``
         # (409 for the caller); this makes the state unrepresentable.
         CheckConstraint(
+            # COALESCE for the same reason as the shape check: without it a
+            # closing row carrying ``{}`` evaluated to NULL and passed.
             "closes_thread IS NULL OR disposition IS NULL "
-            "OR disposition->>'kind' = 'done'",
+            "OR COALESCE(disposition->>'kind', '') = 'done'",
             name="messages_disposition_close_check",
         ),
         Index("idx_messages_thread", "project", "thread_id"),
