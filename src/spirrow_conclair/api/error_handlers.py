@@ -20,6 +20,7 @@ from spirrow_conclair.exceptions import (
     ChatroomNotFoundError,
     ChatroomPermissionError,
     ChatroomStateError,
+    ChatroomUnprocessableError,
 )
 
 
@@ -78,6 +79,12 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ChatroomStateError)
     async def _state(request: Request, exc: ChatroomStateError) -> JSONResponse:
         return _payload(exc, 409)
+
+    @app.exception_handler(ChatroomUnprocessableError)
+    async def _unprocessable(
+        request: Request, exc: ChatroomUnprocessableError
+    ) -> JSONResponse:
+        return _payload(exc, 422)
 
     @app.exception_handler(ChatroomDBError)
     async def _db(request: Request, exc: ChatroomDBError) -> JSONResponse:

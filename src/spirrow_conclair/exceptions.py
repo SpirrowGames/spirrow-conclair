@@ -10,6 +10,7 @@ These map onto HTTP status codes in the FastAPI exception handlers
 | ChatroomPermissionError      | 403       | non-owner action attempted         |
 | ChatroomStateError           | 409       | invalid status transition          |
 | ChatroomThreadResolvedError  | 409       | write into a resolved thread       |
+| ChatroomUnprocessableError   | 422       | request evidence fails a DB check  |
 | ChatroomDBError              | 500       | unexpected DB-level failure        |
 
 Only the leaf classes above get an explicit handler. A subclass with no
@@ -38,6 +39,23 @@ class ChatroomNotFoundError(ChatroomError):
 
 class ChatroomIntegrityError(ChatroomError):
     """Invariant violation (FK / unique / format / propose / closes_thread rule)."""
+
+
+class ChatroomUnprocessableError(ChatroomError):
+    """The request is well-formed but its evidence does not check out.
+
+    A 422, the same status FastAPI gives a body that fails schema
+    validation, because to the caller it is the same kind of mistake: the
+    payload asserts something that is not so. The difference is only that
+    answering needs a DB read, so pydantic cannot do it. Currently raised
+    for a ``naysayer_approved`` close sanction whose ``review_msg_id`` is
+    not a naysayer msg in the closed thread
+    (``services.integrity.assert_close_sanction_evidence``).
+
+    Not a ``ChatroomIntegrityError`` subclass on purpose: that would inherit
+    its 409 through the MRO walk, and a 409 says "the state of the thread
+    forbids this", which is not what happened.
+    """
 
 
 class ChatroomPermissionError(ChatroomError):

@@ -93,6 +93,13 @@ _KNOWN_KINDS: frozenset[str] = frozenset(get_args(CloseSanctionKind))
 # message in it.
 CLOSE_SANCTION_KEY = "close_sanction"
 
+#: The persisted `messages.role` a `naysayer_approved` sanction's
+#: `review_msg_id` must carry. The same token Magickit's gate requires of the
+#: review it allows on, so the two sides check one predicate: a close Magickit
+#: allows is never one Conclair refuses. Not new to Conclair as a string --
+#: `api/projects.py` already knows the `gate:naysayer` tag.
+NAYSAYER_ROLE = "naysayer"
+
 #: Recorded when a caller passes only the legacy `owner_override` boolean.
 UNSPECIFIED_SANCTION: dict[str, Any] = {"kind": "unspecified"}
 
@@ -104,6 +111,7 @@ __all__ = [
     "CloseClassification",
     "CloseSanctionKind",
     "CloseVerdict",
+    "NAYSAYER_ROLE",
     "SanctionRecord",
     "UNSPECIFIED_SANCTION",
     "UnattributableReason",

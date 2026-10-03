@@ -83,6 +83,7 @@ class SanctionedCloseCounts(BaseModel):
 
     pr_gate_ledger: int = 0
     human_override: int = 0
+    naysayer_approved: int = 0
 
 
 class IntegrityCheckResponse(BaseModel):

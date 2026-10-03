@@ -154,7 +154,9 @@ async def test_ledger_carve_out_is_counted_not_reported(client: AsyncClient) -> 
 
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
-    assert body["sanctioned_counts"] == {"pr_gate_ledger": 1, "human_override": 0}
+    assert body["sanctioned_counts"] == {
+        "pr_gate_ledger": 1, "human_override": 0, "naysayer_approved": 0
+    }
     assert body["unattributable"] == []
 
 
@@ -174,7 +176,9 @@ async def test_human_force_close_is_counted_not_reported(client: AsyncClient) ->
 
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
-    assert body["sanctioned_counts"] == {"pr_gate_ledger": 0, "human_override": 1}
+    assert body["sanctioned_counts"] == {
+        "pr_gate_ledger": 0, "human_override": 1, "naysayer_approved": 0
+    }
 
 
 async def test_the_sanction_is_recorded_against_its_own_message(
@@ -218,7 +222,9 @@ async def test_an_owner_closing_their_own_thread_records_nothing(
     assert not [e for e in events if "close_sanction" in e["details"]]
     body = await _audit(client)
     assert body["issue_count"] == 0
-    assert body["sanctioned_counts"] == {"pr_gate_ledger": 0, "human_override": 0}
+    assert body["sanctioned_counts"] == {
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0
+    }
     assert body["unattributable"] == []
 
 
@@ -259,7 +265,9 @@ async def test_owner_self_closes_stay_clean_when_owners_differ(
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
     assert body["unattributable"] == []
-    assert body["sanctioned_counts"] == {"pr_gate_ledger": 0, "human_override": 0}
+    assert body["sanctioned_counts"] == {
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0
+    }
 
 
 # ----- pin 3 / 8: an unrecorded close is still reported, exactly once -----
@@ -455,7 +463,9 @@ async def test_a_legacy_owner_override_is_unclassified_not_corrupt(
 
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
-    assert body["sanctioned_counts"] == {"pr_gate_ledger": 0, "human_override": 0}
+    assert body["sanctioned_counts"] == {
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0
+    }
     assert [u["reason"] for u in body["unattributable"]] == ["unclassified_override"]
 
 
@@ -565,3 +575,110 @@ async def test_post_message_route_records_the_sanction_too(
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
     assert body["sanctioned_counts"]["human_override"] == 1
+
+
+# ----- naysayer_approved (T-close-sanction-unspecified-kind-cannot-be-
+# decomposed, PR-1: D-1 / D-2a / D-7(3)) -----
+
+
+async def _post(
+    client: AsyncClient,
+    thread_id: str,
+    *,
+    author: str,
+    role: str | None,
+    msg_type: str = "report",
+) -> str:
+    payload: dict[str, Any] = {"type": msg_type, "author": author, "content": "x"}
+    if role is not None:
+        payload["role"] = role
+    r = await client.post(f"/v1/projects/p/threads/{thread_id}/messages", json=payload)
+    assert r.status_code == 201, r.text
+    msg_id: str = r.json()["msg"]["msg_id"]
+    return msg_id
+
+
+async def _naysayer_close(
+    client: AsyncClient, thread_id: str, review_msg_id: str, reason: str | None = None
+) -> Any:
+    payload: dict[str, Any] = {
+        "summary_content": "closed on a fresh APPROVE",
+        "author": "human",
+        "owner_override": True,
+        "close_sanction": {"kind": "naysayer_approved", "review_msg_id": review_msg_id},
+    }
+    if reason is not None:
+        payload["owner_override_reason"] = reason
+    return await client.post(f"/v1/projects/p/threads/{thread_id}/close", json=payload)
+
+
+async def test_naysayer_approved_close_is_counted_not_reported(
+    client: AsyncClient,
+) -> None:
+    """D-7(1)/(2) at Conclair's layer: +1 naysayer_approved, nothing else moves,
+    and the human's prose survives in the sibling `owner_override_reason`."""
+    await _open(client, "T-1")
+    review = await _post(client, "T-1", author="Einstein", role="naysayer")
+
+    r = await _naysayer_close(client, "T-1", review, reason="shipping it")
+    assert r.status_code == 201, r.text
+
+    body = await _audit(client)
+    assert body["issue_count"] == 0, body["issues"]
+    assert body["sanctioned_counts"] == {
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 1
+    }
+    assert body["unattributable"] == []
+
+    events = (await client.get("/v1/projects/p/events")).json()["items"]
+    (carrying,) = [e for e in events if "close_sanction" in e["details"]]
+    assert carrying["details"]["close_sanction"] == {
+        "kind": "naysayer_approved", "review_msg_id": review
+    }
+    assert carrying["details"]["owner_override_reason"] == "shipping it"
+
+
+async def test_naysayer_approved_naming_a_non_naysayer_msg_is_422(
+    client: AsyncClient,
+) -> None:
+    """D-7(3), same thread: the propose msg, and a role-less post by the
+    naysayer identity, are both refused -- and nothing is written."""
+    await _open(client, "T-1")
+    roleless = await _post(client, "T-1", author="Einstein", role=None)
+    for target in ("msg-001", roleless):
+        r = await _naysayer_close(client, "T-1", target)
+        assert r.status_code == 422, r.text
+        assert r.json()["error_type"] == "ChatroomUnprocessableError"
+
+    thread = (await client.get("/v1/projects/p/threads/T-1")).json()
+    assert thread["thread"]["status"] != "resolved"
+
+
+async def test_naysayer_approved_naming_another_threads_msg_is_422(
+    client: AsyncClient,
+) -> None:
+    """D-7(3), other thread: msg ids are project-wide, so a real naysayer msg
+    of a sibling thread must not satisfy this thread's close."""
+    await _open(client, "T-1")
+    await _open(client, "T-2")
+    elsewhere = await _post(client, "T-2", author="Einstein", role="naysayer")
+
+    r = await _naysayer_close(client, "T-1", elsewhere)
+    assert r.status_code == 422, r.text
+    assert r.json()["details"]["thread_id"] == "T-1"
+
+
+async def test_naysayer_approved_without_review_msg_id_is_422(
+    client: AsyncClient,
+) -> None:
+    await _open(client, "T-1")
+    r = await client.post(
+        "/v1/projects/p/threads/T-1/close",
+        json={
+            "summary_content": "closed",
+            "author": "human",
+            "owner_override": True,
+            "close_sanction": {"kind": "naysayer_approved"},
+        },
+    )
+    assert r.status_code == 422, r.text
