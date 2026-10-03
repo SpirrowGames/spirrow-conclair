@@ -23,13 +23,18 @@ Invariants enforced (per design v2 §9):
 5. references_threads (when set) must all exist in the same project
 6. msg_id uniqueness — enforced by composite PK at the DB layer
 7. a msg with closes_thread set must not also name a next_participant
+8. a msg with closes_thread set may carry disposition ``{kind: done}`` or none
+   (pre-write assert + DB CHECK only; not in the audit, because the CHECK
+   shipped with the column and no row can violate it)
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import BigInteger, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -290,6 +295,42 @@ def assert_next_participant_rule(
             "the participant and leave closes_thread unset.",
             details={
                 "next_participant": next_participant,
+                "closes_thread": closes_thread,
+            },
+        )
+
+
+def assert_disposition_close_rule(
+    *,
+    disposition: Mapping[str, Any] | None,
+    closes_thread: str | None,
+) -> None:
+    """Invariant 8: a msg that closes its thread is ``done`` or says nothing.
+
+    ``blocked_on`` names somebody to wake. On a closing msg that is the same
+    contradiction invariant 7 refuses for ``next_participant`` -- a settled
+    thread with a pending successor -- spelled through the other field.
+    ``messages_disposition_close_check`` makes the row unrepresentable; this
+    gives the caller a 409 that names the fields instead of a 500 from the
+    constraint.
+
+    **Call this after** :func:`assert_closes_thread_rule`, for the same reason
+    as :func:`assert_next_participant_rule`.
+
+    ``wake`` is deliberately not checked for existence (D-3): that needs the
+    identity registry, which is Magickit's.
+    """
+    if closes_thread is None or disposition is None:
+        return
+    kind = disposition.get("kind")
+    if kind != "done":
+        raise ChatroomIntegrityError(
+            f"a msg that closes its thread can carry only disposition "
+            f"kind='done', but kind='{kind}' was supplied alongside "
+            f"closes_thread='{closes_thread}'. To leave the thread waiting on "
+            "someone, post the blocked_on disposition without closing.",
+            details={
+                "disposition_kind": kind,
                 "closes_thread": closes_thread,
             },
         )
