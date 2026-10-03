@@ -215,3 +215,14 @@ async def test_db_check_allows_done_on_a_closing_row(
     await _open(client)
     db_session.add(_row("msg-902", closes_thread="T-1", disposition={"kind": "done"}))
     await db_session.flush()
+
+
+async def test_floor_only_row_does_not_break_the_thread_view(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    # Passes the DB floor, fails the strict model. The thread view must still
+    # be served, with the row returned as stored. (PR-gate advisory on #32.)
+    await _open(client)
+    db_session.add(_row("msg-905", type="report", disposition={"kind": "blocked_on"}))
+    await db_session.commit()
+    assert (await _messages(client))[-1]["disposition"] == {"kind": "blocked_on"}

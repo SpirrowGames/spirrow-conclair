@@ -185,6 +185,56 @@ def test_message_schema_null_disposition() -> None:
     assert msg.disposition is None
 
 
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"kind": "blocked_on"},
+        {"kind": "done", "typo": True},
+        {"kind": "blocked_on", "trigger": {"arm": "nope", "ref": "r"}, "wake": "w"},
+    ],
+    ids=["no-trigger", "extra-key", "unknown-arm"],
+)
+def test_message_schema_returns_floor_only_rows_raw(stored: dict[str, Any]) -> None:
+    # A row that passes the DB floor but not the strict model (written around
+    # the API) must not fail the read: it comes back as stored, not a 500.
+    msg = Message.model_validate(
+        {
+            "project": "p",
+            "msg_id": "msg-001",
+            "thread_id": "T-1",
+            "author": "a",
+            "timestamp": "2026-10-03T00:00:00Z",
+            "type": "report",
+            "content": "c",
+            "disposition": stored,
+        }
+    )
+    assert msg.model_dump(mode="json")["disposition"] == stored
+
+
+def test_message_schema_prefers_the_strict_model() -> None:
+    # left_to_right: a valid row is the typed model, not the raw fallback.
+    msg = Message.model_validate(
+        {
+            "project": "p",
+            "msg_id": "msg-001",
+            "thread_id": "T-1",
+            "author": "a",
+            "timestamp": "2026-10-03T00:00:00Z",
+            "type": "handoff",
+            "content": "c",
+            "disposition": _blocked(),
+        }
+    )
+    assert not isinstance(msg.disposition, dict)
+
+
+def test_request_side_stays_strict() -> None:
+    # The leniency is read-only: a caller still gets a 422 for the same value.
+    with pytest.raises(ValidationError):
+        _req({"kind": "blocked_on"})
+
+
 # ----- invariant 8 ---------------------------------------------------------
 
 

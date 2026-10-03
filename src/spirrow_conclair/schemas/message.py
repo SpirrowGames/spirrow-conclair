@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -167,7 +167,19 @@ class Message(BaseModel):
     # How the author left the thread. Persisted verbatim (shape-checked
     # only); null when the caller sent none, which includes every msg
     # written before migration 0010.
-    disposition: Disposition | None = None
+    #
+    # The read side is deliberately more lenient than the write side. The
+    # DB CHECK is only a floor (object + known `kind`), so a writer that
+    # bypasses the API can store e.g. `{"kind": "blocked_on"}` with no
+    # trigger. Validating such a row strictly here would 500 the whole
+    # thread view over one msg. Instead the strict model is tried first
+    # (left_to_right) and a row it refuses is returned as the raw stored
+    # object: the reader sees exactly what is in the DB, and a read-back
+    # comparison against what was sent still detects the mismatch.
+    # (PR-gate advisory on #32.)
+    disposition: Disposition | dict[str, Any] | None = Field(
+        default=None, union_mode="left_to_right"
+    )
 
 
 class PostMessageRequest(BaseModel):
