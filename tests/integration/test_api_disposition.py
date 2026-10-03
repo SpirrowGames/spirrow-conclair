@@ -85,6 +85,20 @@ async def test_omitted_stays_null(client: AsyncClient) -> None:
     assert all(m["disposition"] is None for m in await _messages(client))
 
 
+async def test_omitted_is_stored_as_sql_null(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    # Not JSON 'null': the CHECKs read `disposition IS NULL`, and a JSON
+    # null would fail them (SQLAlchemy's JSON default for None).
+    await _open(client)
+    r = await _post(client, type="report")
+    assert r.status_code == 201, r.text
+    sql_nulls = await db_session.scalar(
+        text("SELECT count(*) FROM messages WHERE disposition IS NULL")
+    )
+    assert sql_nulls == len(await _messages(client))
+
+
 async def test_unknown_key_is_422_and_writes_nothing(client: AsyncClient) -> None:
     await _open(client)
     before = len(await _messages(client))

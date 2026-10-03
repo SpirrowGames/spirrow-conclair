@@ -76,7 +76,15 @@ class Message(Base):
     # behaviour, and every row written before migration 0010 is NULL.
     # Conclair checks shape only; whether ``wake`` resolves to an identity is
     # Magickit's question (same D-3 boundary as ``role``).
-    disposition: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    #
+    # ``none_as_null=True`` is load-bearing: SQLAlchemy's JSON types store a
+    # Python ``None`` as the JSON value ``null`` by default, which is NOT SQL
+    # NULL. Every msg posted without a disposition would then fail
+    # ``disposition IS NULL`` in both CHECKs below, and the NULL-safe
+    # predicates refuse a JSON ``null`` (it has no ``kind``).
+    disposition: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint("project", "msg_id", name="messages_pkey"),
