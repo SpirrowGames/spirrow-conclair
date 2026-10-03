@@ -43,6 +43,7 @@ from spirrow_conclair.exceptions import (
     ChatroomIntegrityError,
     ChatroomNotFoundError,
     ChatroomThreadResolvedError,
+    ChatroomUnprocessableError,
 )
 from spirrow_conclair.models import ChatroomEvent, Message, Thread
 from spirrow_conclair.schemas.event import (
@@ -50,7 +51,9 @@ from spirrow_conclair.schemas.event import (
     SanctionedCloseCounts,
     UnattributableClose,
 )
+from spirrow_conclair.schemas.message import CloseSanction
 from spirrow_conclair.services.close_sanction import (
+    NAYSAYER_ROLE,
     SanctionRecord,
     classify_non_owner_close,
     read_sanction_record,
@@ -410,6 +413,96 @@ async def assert_msg_in_thread(
         )
 
 
+def check_naysayer_review_row(
+    *,
+    review_msg_id: str,
+    thread_id: str,
+    found: bool,
+    role: str | None,
+) -> None:
+    """Decide a ``naysayer_approved`` claim from the one row it points at.
+
+    The pure half of :func:`assert_close_sanction_evidence`, split out so the
+    rule is testable without a database. ``found`` is whether
+    ``review_msg_id`` exists *in this thread*; ``role`` is that msg's
+    persisted ``role`` (meaningless when ``found`` is false).
+
+    Raises:
+        ChatroomUnprocessableError: (422) if the msg is not in the thread, or
+            its persisted role is not ``NAYSAYER_ROLE``.
+    """
+    if not found:
+        raise ChatroomUnprocessableError(
+            f"close_sanction kind='naysayer_approved' names review_msg_id "
+            f"'{review_msg_id}', which does not exist in thread '{thread_id}'",
+            details={"review_msg_id": review_msg_id, "thread_id": thread_id},
+        )
+    if role != NAYSAYER_ROLE:
+        raise ChatroomUnprocessableError(
+            f"close_sanction kind='naysayer_approved' names review_msg_id "
+            f"'{review_msg_id}', whose persisted role is {role!r}, not "
+            f"'{NAYSAYER_ROLE}'",
+            details={
+                "review_msg_id": review_msg_id,
+                "thread_id": thread_id,
+                "role": role,
+            },
+        )
+
+
+async def assert_close_sanction_evidence(
+    session: AsyncSession,
+    *,
+    project: str,
+    thread_id: str,
+    close_sanction: CloseSanction | None,
+) -> None:
+    """Check the evidence of a close sanction that Conclair can check itself.
+
+    The boundary (T-close-sanction-unspecified-kind-cannot-be-decomposed
+    msg-1087 §0): Conclair checks at write time what its own rows can answer,
+    and nothing that needs another service. ``pr_gate_ledger`` evidence lives
+    on GitHub, so it is recorded unchecked (``services.close_sanction``).
+    ``naysayer_approved`` evidence is a msg in this DB, so it is checked:
+
+    1. ``review_msg_id`` exists **in the closed thread** -- msg ids are
+       allocated project-wide, so filtering on the project alone would accept
+       a sibling thread's msg; and
+    2. its persisted ``role`` is ``"naysayer"``.
+
+    The verdict is deliberately not checked. Parsing it would copy Magickit's
+    verdict parser into Conclair, one judgement kept in two places. Verdict
+    and freshness are Magickit's; a reader re-derives them from
+    ``review_msg_id``, as ``approving_review_id`` is re-derived from GitHub.
+
+    What this protects is the count, not a security boundary: ``role`` is a
+    self-declared string, so a hostile caller could plant a msg first. It
+    catches a defective caller pointing at an unrelated msg (msg-1087 §1(a)).
+
+    Raises:
+        ChatroomUnprocessableError: (422) see :func:`check_naysayer_review_row`.
+    """
+    if close_sanction is None or close_sanction.kind != "naysayer_approved":
+        return
+    review_msg_id = close_sanction.review_msg_id
+    if review_msg_id is None:  # the schema validator requires it for the kind
+        raise AssertionError("naysayer_approved sanction without review_msg_id")
+    result = await session.execute(
+        select(Message.role).where(
+            Message.project == project,
+            Message.thread_id == thread_id,
+            Message.msg_id == review_msg_id,
+        )
+    )
+    row = result.one_or_none()
+    check_naysayer_review_row(
+        review_msg_id=review_msg_id,
+        thread_id=thread_id,
+        found=row is not None,
+        role=row[0] if row is not None else None,
+    )
+
+
 async def assert_references_threads_exist(
     session: AsyncSession,
     *,
@@ -746,6 +839,7 @@ async def audit_project(
         sanctioned_counts=SanctionedCloseCounts(
             pr_gate_ledger=sanctioned_tally["pr_gate_ledger"],
             human_override=sanctioned_tally["human_override"],
+            naysayer_approved=sanctioned_tally["naysayer_approved"],
         ),
         unattributable=unattributable,
     )

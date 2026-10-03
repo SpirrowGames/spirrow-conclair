@@ -48,14 +48,36 @@ class CloseSanction(BaseModel):
     pr: str | None = None
     merged_head: str | None = None
     approving_review_id: str | None = None
+    #: naysayer_approved evidence: the msg carrying the fresh APPROVE the
+    #: gate accepted. Required for that kind and refused on every other.
+    #: Unlike the ledger fields this one *is* checked at write time -- the
+    #: msg lives in Conclair's own table, so the check needs no other
+    #: service (``services.integrity.assert_close_sanction_evidence``). Only
+    #: the shape is checked here; existence and role need the DB.
+    review_msg_id: str | None = None
 
     @model_validator(mode="after")
     def _evidence_matches_kind(self) -> CloseSanction:
+        """Each kind carries exactly its own evidence, and nothing else.
+
+        Every member of ``CloseSanctionKind`` has a branch of its own. The
+        final ``else`` used to be the ``unspecified`` branch, which meant a
+        newly added kind fell into it silently and was refused as "carries no
+        evidence" -- every close of that kind a 422, with a message naming the
+        wrong kind. The ``else`` is now unreachable through the wire (the
+        ``Literal`` refuses unknown kinds before this runs) and raises, so a
+        kind added to the vocabulary without a branch here fails loudly. The
+        unit test ``test_every_kind_has_an_explicit_evidence_branch`` pins it.
+        """
         ledger_fields = {
             "pr": self.pr,
             "merged_head": self.merged_head,
             "approving_review_id": self.approving_review_id,
         }
+        if self.kind != "naysayer_approved" and self.review_msg_id:
+            raise ValueError(
+                f"close_sanction kind='{self.kind}' does not carry 'review_msg_id'"
+            )
         if self.kind == "human_override":
             if not self.reason:
                 raise ValueError("close_sanction kind='human_override' requires 'reason'")
@@ -75,7 +97,24 @@ class CloseSanction(BaseModel):
                 raise ValueError(
                     "close_sanction kind='pr_gate_ledger' does not carry 'reason'"
                 )
-        else:  # unspecified: a claim of no claim, so it carries no evidence
+        elif self.kind == "naysayer_approved":
+            if not self.review_msg_id:
+                raise ValueError(
+                    "close_sanction kind='naysayer_approved' requires 'review_msg_id'"
+                )
+            # The prose a human wrote alongside an approved close travels in
+            # the sibling `owner_override_reason`, not here: the sanction
+            # names the evidence, and the evidence is the review.
+            supplied = [name for name, v in ledger_fields.items() if v]
+            if self.reason:
+                supplied.append("reason")
+            if supplied:
+                raise ValueError(
+                    f"close_sanction kind='naysayer_approved' carries only "
+                    f"'review_msg_id', got {sorted(supplied)}"
+                )
+        elif self.kind == "unspecified":
+            # A claim of no claim, so it carries no evidence.
             supplied = [name for name, v in ledger_fields.items() if v]
             if self.reason:
                 supplied.append("reason")
@@ -84,6 +123,13 @@ class CloseSanction(BaseModel):
                     f"close_sanction kind='unspecified' carries no evidence, "
                     f"got {sorted(supplied)}"
                 )
+        else:
+            # Unreachable through the wire. `raise`, not `assert`: an
+            # `assert` statement disappears under `python -O`.
+            raise AssertionError(
+                f"close_sanction kind={self.kind!r} has no evidence branch in "
+                f"CloseSanction._evidence_matches_kind"
+            )
         return self
 
 

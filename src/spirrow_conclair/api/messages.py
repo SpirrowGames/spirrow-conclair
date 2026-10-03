@@ -171,6 +171,14 @@ async def post_message_in_session(
         project=project,
         references_threads=references_threads,
     )
+    # A `naysayer_approved` sanction's evidence is a msg in this thread, so
+    # it is checked here, at the one choke point both close routes share.
+    await integrity_svc.assert_close_sanction_evidence(
+        session,
+        project=project,
+        thread_id=thread.thread_id,
+        close_sanction=close_sanction,
+    )
 
     msg_id = await allocate_next_msg_id(session, project)
     msg_orm = Message(
