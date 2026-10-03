@@ -53,6 +53,7 @@ async def post_message_in_session(
     embodiment: str | None = None,
     role: str | None = None,
     next_participant: str | None = None,
+    disposition: dict[str, Any] | None = None,
     owner_override: bool = False,
     owner_override_reason: str | None = None,
     close_sanction: CloseSanction | None = None,
@@ -154,6 +155,11 @@ async def post_message_in_session(
         next_participant=next_participant,
         closes_thread=closes_thread,
     )
+    # Same placement rule as the one above: after assert_closes_thread_rule.
+    integrity_svc.assert_disposition_close_rule(
+        disposition=disposition,
+        closes_thread=closes_thread,
+    )
     await integrity_svc.assert_reply_to_in_thread(
         session,
         project=project,
@@ -184,6 +190,7 @@ async def post_message_in_session(
         embodiment=embodiment,
         role=role,
         next_participant=next_participant,
+        disposition=disposition,
     )
     session.add(msg_orm)
     # The thread's activity sort key. This is the *only* place a msg is added
@@ -288,6 +295,14 @@ async def post_message(
             embodiment=body.embodiment,
             role=body.role,
             next_participant=body.next_participant,
+            # Stored as the validated model's JSON form: `fallback` is dropped
+            # when absent rather than persisted as null, so the stored value
+            # is exactly what a reader needs and nothing a reader must skip.
+            disposition=(
+                body.disposition.model_dump(mode="json", exclude_none=True)
+                if body.disposition is not None
+                else None
+            ),
             owner_override=body.owner_override,
             owner_override_reason=body.owner_override_reason,
             close_sanction=body.close_sanction,

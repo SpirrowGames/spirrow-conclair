@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from spirrow_conclair.schemas.close_sanction_vocab import CloseSanctionKind
+from spirrow_conclair.schemas.disposition_vocab import (
+    DispositionArm,
+    DispositionFallbackReason,
+)
 from spirrow_conclair.schemas.thread import Thread
 
 MessageType = Literal[
@@ -83,6 +87,59 @@ class CloseSanction(BaseModel):
         return self
 
 
+class _DispositionPart(BaseModel):
+    """Common config: strict keys, stripped strings.
+
+    ``extra="forbid"`` is the point of this class. ``PostMessageRequest`` has
+    no ``extra`` setting, so pydantic's default (``ignore``) is what silently
+    dropped every ``disposition`` Magickit forwarded before this field
+    existed. Inside the disposition a misspelled key is refused with a 422
+    rather than lost the same way.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class DispositionTrigger(_DispositionPart):
+    arm: DispositionArm
+    ref: str = Field(min_length=1)
+
+
+class DispositionFallback(_DispositionPart):
+    """Record of a system rewrite of the caller's claim (D-8 (3)).
+
+    Present only when Magickit replaced the caller's disposition: ``declared``
+    is what the caller said, ``owner`` is the thread owner that failed to
+    resolve, ``reason`` names the rule. Conclair does not verify any of it
+    (D-3); it only requires the record to be complete so a reader can.
+    """
+
+    reason: DispositionFallbackReason
+    owner: str = Field(min_length=1)
+    declared: Literal["done"]
+
+
+class DispositionDone(_DispositionPart):
+    kind: Literal["done"]
+
+
+class DispositionBlockedOn(_DispositionPart):
+    kind: Literal["blocked_on"]
+    trigger: DispositionTrigger
+    #: An identity name, stored verbatim. Whether it resolves is Magickit's
+    #: question (registry lookup), not Conclair's.
+    wake: str = Field(min_length=1)
+    fallback: DispositionFallback | None = None
+
+
+#: ``{kind: done} | {kind: blocked_on, trigger: {arm, ref}, wake, fallback?}``
+#: (magickit DESIGN v6 §2 範囲 1; ``fallback``: T-conclair-persist-disposition-
+#: and-d8-readback DESIGN v1 §1).
+Disposition = Annotated[
+    DispositionDone | DispositionBlockedOn, Field(discriminator="kind")
+]
+
+
 class Message(BaseModel):
     model_config = ConfigDict(from_attributes=True, str_strip_whitespace=True)
 
@@ -107,6 +164,10 @@ class Message(BaseModel):
     # Who acts next. Persisted verbatim; Magickit validates the name. Null on
     # a msg that closes its thread — closing IS "nobody is next" (invariant 7).
     next_participant: str | None = None
+    # How the author left the thread. Persisted verbatim (shape-checked
+    # only); null when the caller sent none, which includes every msg
+    # written before migration 0010.
+    disposition: Disposition | None = None
 
 
 class PostMessageRequest(BaseModel):
@@ -134,6 +195,12 @@ class PostMessageRequest(BaseModel):
     # only rule is structural: a msg setting closes_thread must not also name a
     # successor (invariant 7, services.integrity.assert_next_participant_rule).
     next_participant: str | None = None
+    # How the author left the thread (done / blocked_on). Optional: omitted
+    # -> NULL, the pre-0010 behaviour. Shape is checked here; whether `wake`
+    # names a real identity is Magickit's check (D-3). A msg that closes its
+    # thread may carry only `{kind: done}` -- see
+    # services.integrity.assert_disposition_close_rule.
+    disposition: Disposition | None = None
     # ADR-2026-06-04-19 D-5: when true, skip the owner==author check for a
     # closes_thread decide so a Tier-C human can force-close a non-owned
     # thread. Conclair only honors the flag (no identity logic) — Magickit is
