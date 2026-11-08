@@ -36,12 +36,14 @@ passed. These two tests are therefore the integration-level pin on the lock.
 The static pin is `tests/unit/test_row_lock_is_at_the_choke_point.py`.
 
 Failure containment: each request task is started through
-`_requests_contained()`. If the probe or an assertion fails while the holder
+`tasks_contained()`. If the probe or an assertion fails while the holder
 is open, the holder rolls back first, and then every request task that has not
 finished is cancelled and awaited before the failure propagates -- so no
 request is left running into fixture teardown (PR-gate advisory on #34 @
 7435e82). On the passing path the test body awaits the task itself, and the
-helper has nothing left to do.
+helper has nothing left to do. The helper lives in `tests/task_containment.py`
+and its failure path is pinned without Postgres by
+`tests/unit/test_task_containment.py`.
 
 Deadlock note: unlike the barrier tests in `test_api_double_close_race.py`,
 the holder here is not a task waiting on the other task -- it is this test
@@ -52,8 +54,6 @@ inside the event loop, so nothing is circular.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator, Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
@@ -66,6 +66,7 @@ from spirrow_conclair.api.messages import post_message_in_session
 from spirrow_conclair.schemas.message import CloseSanction
 from spirrow_conclair.services.integrity import fetch_thread_or_raise
 from spirrow_conclair.services.msg_id_allocator import parse_msg_id
+from tests.task_containment import tasks_contained
 
 CUTOVER = datetime(2026, 9, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -191,34 +192,6 @@ def _assert_row_lock_wait(blocked: dict[str, Any]) -> None:
     assert "FOR UPDATE" in blocked["query"].upper(), blocked
 
 
-@contextlib.asynccontextmanager
-async def _requests_contained() -> AsyncIterator[
-    Callable[[Coroutine[Any, Any, Response]], asyncio.Task[Response]]
-]:
-    """Yield a task starter; on a failure, cancel and await what it started.
-
-    Only the failure path does anything: if the body raises, each started task
-    that is still running is cancelled, and every started task is awaited
-    (its own outcome swallowed) before the body's exception propagates. The
-    body's exception is the one reported, not a side effect of the cleanup.
-    """
-    tasks: list[asyncio.Task[Response]] = []
-
-    def start(coro: Coroutine[Any, Any, Response]) -> asyncio.Task[Response]:
-        task = asyncio.create_task(coro)
-        tasks.append(task)
-        return task
-
-    try:
-        yield start
-    except BaseException:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
-
-
 async def _thread_view(client: AsyncClient, thread_id: str) -> dict[str, Any]:
     r = await client.get(f"/v1/projects/p/threads/{thread_id}?mode=full")
     assert r.status_code == 200, r.text
@@ -236,7 +209,7 @@ async def test_a_close_waiting_behind_an_uncommitted_reply_sees_head_moved(
     await _open(client, "T-1")
     head = await _post_done(client, "T-1")
 
-    async with _requests_contained() as start_request:
+    async with tasks_contained() as start_request:
         async with session_factory() as reply_session:
             async with reply_session.begin():
                 holder_pid = await _backend_pid(reply_session)
@@ -296,7 +269,7 @@ async def test_a_reply_waiting_behind_an_uncommitted_close_is_refused(
     await _open(client, "T-1")
     head = await _post_done(client, "T-1")
 
-    async with _requests_contained() as start_request:
+    async with tasks_contained() as start_request:
         async with session_factory() as close_session:
             async with close_session.begin():
                 holder_pid = await _backend_pid(close_session)
