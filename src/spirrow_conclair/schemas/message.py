@@ -55,6 +55,14 @@ class CloseSanction(BaseModel):
     #: service (``services.integrity.assert_close_sanction_evidence``). Only
     #: the shape is checked here; existence and role need the DB.
     review_msg_id: str | None = None
+    #: settled_disposition evidence: the thread's head msg, whose ``done``
+    #: disposition the close carries out. Required for that kind and refused
+    #: on every other. Checked at write time under the thread's row lock --
+    #: it must still *be* the head, which is the compare-and-set that keeps a
+    #: reply posted after the settlement from being closed over
+    #: (``services.integrity.assert_close_sanction_evidence``). Only the shape
+    #: is checked here.
+    head_msg_id: str | None = None
 
     @model_validator(mode="after")
     def _evidence_matches_kind(self) -> CloseSanction:
@@ -77,6 +85,10 @@ class CloseSanction(BaseModel):
         if self.kind != "naysayer_approved" and self.review_msg_id:
             raise ValueError(
                 f"close_sanction kind='{self.kind}' does not carry 'review_msg_id'"
+            )
+        if self.kind != "settled_disposition" and self.head_msg_id:
+            raise ValueError(
+                f"close_sanction kind='{self.kind}' does not carry 'head_msg_id'"
             )
         if self.kind == "human_override":
             if not self.reason:
@@ -112,6 +124,21 @@ class CloseSanction(BaseModel):
                 raise ValueError(
                     f"close_sanction kind='naysayer_approved' carries only "
                     f"'review_msg_id', got {sorted(supplied)}"
+                )
+        elif self.kind == "settled_disposition":
+            if not self.head_msg_id:
+                raise ValueError(
+                    "close_sanction kind='settled_disposition' requires 'head_msg_id'"
+                )
+            # `review_msg_id` is already refused above for every kind but
+            # naysayer_approved; the rest are listed here.
+            supplied = [name for name, v in ledger_fields.items() if v]
+            if self.reason:
+                supplied.append("reason")
+            if supplied:
+                raise ValueError(
+                    f"close_sanction kind='settled_disposition' carries only "
+                    f"'head_msg_id', got {sorted(supplied)}"
                 )
         elif self.kind == "unspecified":
             # A claim of no claim, so it carries no evidence.
