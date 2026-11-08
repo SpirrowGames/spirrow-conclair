@@ -26,9 +26,14 @@ the committed (old) head, pass the comparison, and only then block -- on the
 advisory lock in `allocate_next_msg_id` (wait event `advisory`). Then it would
 write a close on top of the reply. The probe therefore requires the waiter to
 be in a row-lock wait (`transactionid` / `tuple`) on a `FOR UPDATE`
-statement. That is the wait the compare-and-set depends on. If the lock is
-dropped, this test fails at the probe with a message naming the wait it saw,
-and fails again at the 422 assertion.
+statement. That is the wait the compare-and-set depends on.
+
+Measured, not argued: with `with_for_update=True` removed (probe commit
+a4e3bfa on PR #34, CI run 42464732940), both tests here failed at the probe
+-- the waiter was in `wait_event='advisory'` on
+`SELECT pg_advisory_xact_lock(...)` -- and the other 277 integration tests
+passed. These two tests are therefore the integration-level pin on the lock.
+The static pin is `tests/unit/test_row_lock_is_at_the_choke_point.py`.
 
 Deadlock note: unlike the barrier tests in `test_api_double_close_race.py`,
 the holder here is not a task waiting on the other task -- it is this test
