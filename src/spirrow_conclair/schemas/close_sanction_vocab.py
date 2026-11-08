@@ -29,7 +29,11 @@ from typing import Literal
 #: (not a `str` `Enum`) so pydantic's own JSON-Schema and error messages call
 #: the values by their string form -- the API's public contract.
 CloseSanctionKind = Literal[
-    "human_override", "pr_gate_ledger", "naysayer_approved", "unspecified"
+    "human_override",
+    "pr_gate_ledger",
+    "naysayer_approved",
+    "settled_disposition",
+    "unspecified",
 ]
 
 #: Wire vocabulary for `UnattributableClose.reason`.
@@ -51,11 +55,19 @@ UnattributableReason = Literal["pre_recording", "unclassified_override"]
 #: Conclair's own `messages` table, which the write path checks (see
 #: `services.integrity.assert_close_sanction_evidence`).
 #:
+#: `settled_disposition` is `True` for the same reason as
+#: `naysayer_approved`: its evidence -- the thread's head msg, a proposer's
+#: `done` disposition naming no successor -- is a row in Conclair's own
+#: `messages` table, checked under the thread's row lock on the write path
+#: (`services.integrity.assert_close_sanction_evidence`). The close is the
+#: proposer's own settlement carried out by somebody else, not a bypass.
+#:
 #: `unspecified` is `False` on purpose: it says a bypass happened and
 #: nothing about *which*, so it belongs in the unattributable bucket.
 KIND_IS_SANCTIONED: dict[CloseSanctionKind, bool] = {
     "human_override": True,
     "pr_gate_ledger": True,
     "naysayer_approved": True,
+    "settled_disposition": True,
     "unspecified": False,
 }

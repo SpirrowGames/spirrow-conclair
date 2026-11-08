@@ -54,6 +54,7 @@ from spirrow_conclair.schemas.event import (
 from spirrow_conclair.schemas.message import CloseSanction
 from spirrow_conclair.services.close_sanction import (
     NAYSAYER_ROLE,
+    SETTLED_DISPOSITION_ROLE,
     SanctionRecord,
     classify_non_owner_close,
     read_sanction_record,
@@ -450,11 +451,87 @@ def check_naysayer_review_row(
         )
 
 
+def check_settled_disposition_row(
+    *,
+    head_msg_id: str,
+    thread_id: str,
+    last_msg_num: int | None,
+    found: bool,
+    role: str | None,
+    next_participant: str | None,
+    disposition: Any,
+) -> None:
+    """Decide a ``settled_disposition`` claim from the one row it points at.
+
+    The pure half of :func:`assert_close_sanction_evidence`, the same split as
+    :func:`check_naysayer_review_row`. ``found`` is whether ``head_msg_id``
+    exists *in this thread*; ``role`` / ``next_participant`` / ``disposition``
+    are that msg's persisted columns (meaningless when ``found`` is false).
+    ``last_msg_num`` is the thread's activity key **as read under the row
+    lock** -- that is what makes (b) a compare-and-set and not a stale read.
+
+    The claim holds only if all five do:
+
+    (a) the msg is in the closed thread (msg ids are project-wide);
+    (b) it is still the thread's head: ``parse_msg_id(head_msg_id) ==
+        last_msg_num``. A msg posted after the settlement -- an objection, a
+        follow-up -- moves the head, and the close is refused with
+        ``details.reason == "head_moved"``, which callers report as such;
+    (c) its ``disposition`` is an object with ``kind == "done"``;
+    (d) it names no successor (``next_participant`` is null) -- ``done`` and
+        "somebody is next" contradict each other;
+    (e) its persisted ``role`` is ``SETTLED_DISPOSITION_ROLE``.
+
+    Raises:
+        ChatroomUnprocessableError: (422) naming the first condition that
+            failed, in ``details.reason``.
+    """
+    base: dict[str, Any] = {"head_msg_id": head_msg_id, "thread_id": thread_id}
+    prefix = (
+        f"close_sanction kind='settled_disposition' names head_msg_id "
+        f"'{head_msg_id}'"
+    )
+    if not found:
+        raise ChatroomUnprocessableError(
+            f"{prefix}, which does not exist in thread '{thread_id}'",
+            details={**base, "reason": "not_in_thread"},
+        )
+    if parse_msg_id(head_msg_id) != last_msg_num:
+        raise ChatroomUnprocessableError(
+            f"{prefix}, which is no longer the head of thread '{thread_id}' "
+            f"(last_msg_num={last_msg_num})",
+            details={**base, "reason": "head_moved", "last_msg_num": last_msg_num},
+        )
+    kind = disposition.get("kind") if isinstance(disposition, dict) else None
+    if kind != "done":
+        raise ChatroomUnprocessableError(
+            f"{prefix}, whose persisted disposition is not kind='done' "
+            f"(got {disposition!r})",
+            details={**base, "reason": "not_done", "disposition": disposition},
+        )
+    if next_participant is not None:
+        raise ChatroomUnprocessableError(
+            f"{prefix}, which names a successor "
+            f"(next_participant={next_participant!r}) alongside its 'done'",
+            details={
+                **base,
+                "reason": "names_successor",
+                "next_participant": next_participant,
+            },
+        )
+    if role != SETTLED_DISPOSITION_ROLE:
+        raise ChatroomUnprocessableError(
+            f"{prefix}, whose persisted role is {role!r}, not "
+            f"'{SETTLED_DISPOSITION_ROLE}'",
+            details={**base, "reason": "role_not_eligible", "role": role},
+        )
+
+
 async def assert_close_sanction_evidence(
     session: AsyncSession,
     *,
     project: str,
-    thread_id: str,
+    thread: Thread,
     close_sanction: CloseSanction | None,
 ) -> None:
     """Check the evidence of a close sanction that Conclair can check itself.
@@ -463,7 +540,9 @@ async def assert_close_sanction_evidence(
     msg-1087 §0): Conclair checks at write time what its own rows can answer,
     and nothing that needs another service. ``pr_gate_ledger`` evidence lives
     on GitHub, so it is recorded unchecked (``services.close_sanction``).
-    ``naysayer_approved`` evidence is a msg in this DB, so it is checked:
+    Two kinds have their evidence in this DB, so they are checked.
+
+    ``naysayer_approved``:
 
     1. ``review_msg_id`` exists **in the closed thread** -- msg ids are
        allocated project-wide, so filtering on the project alone would accept
@@ -475,32 +554,76 @@ async def assert_close_sanction_evidence(
     and freshness are Magickit's; a reader re-derives them from
     ``review_msg_id``, as ``approving_review_id`` is re-derived from GitHub.
 
+    ``settled_disposition``: see :func:`check_settled_disposition_row` -- the
+    head msg is in the thread, is *still* the head (the compare-and-set,
+    against ``thread.last_msg_num`` as read under the row lock), is a
+    ``done`` naming no successor, and was posted as ``proposer``. Two
+    conditions are deliberately **not** checked here, because they are not
+    facts of a row: the grace period since the head was posted (a policy
+    threshold, and one that only becomes more true with time) and "the owner
+    is not a human" (needs Prismind's identity kind). Both are Magickit's, in
+    its carve-out (chatroom ``spirrow-mindwire/T-done-disposition-auto-close``
+    msg-8185 §A, under the msg-1087 §0 boundary above).
+
+    **Call this after the row lock** (``post_message_in_session``'s
+    ``with_for_update`` refresh) and before the closing msg's id is
+    allocated: ``thread`` must be the locked row, or the head comparison is
+    the stale read it exists to rule out.
+
     What this protects is the count, not a security boundary: ``role`` is a
     self-declared string, so a hostile caller could plant a msg first. It
     catches a defective caller pointing at an unrelated msg (msg-1087 §1(a)).
+    The same holds for ``settled_disposition``: a caller that can name itself
+    ``proposer`` can plant the head it then closes on.
 
     Raises:
-        ChatroomUnprocessableError: (422) see :func:`check_naysayer_review_row`.
+        ChatroomUnprocessableError: (422) see :func:`check_naysayer_review_row`
+            and :func:`check_settled_disposition_row`.
     """
-    if close_sanction is None or close_sanction.kind != "naysayer_approved":
+    if close_sanction is None:
         return
-    review_msg_id = close_sanction.review_msg_id
-    if review_msg_id is None:  # the schema validator requires it for the kind
-        raise AssertionError("naysayer_approved sanction without review_msg_id")
-    result = await session.execute(
-        select(Message.role).where(
-            Message.project == project,
-            Message.thread_id == thread_id,
-            Message.msg_id == review_msg_id,
+    thread_id = thread.thread_id
+    if close_sanction.kind == "naysayer_approved":
+        review_msg_id = close_sanction.review_msg_id
+        if review_msg_id is None:  # the schema validator requires it for the kind
+            raise AssertionError("naysayer_approved sanction without review_msg_id")
+        result = await session.execute(
+            select(Message.role).where(
+                Message.project == project,
+                Message.thread_id == thread_id,
+                Message.msg_id == review_msg_id,
+            )
         )
-    )
-    row = result.one_or_none()
-    check_naysayer_review_row(
-        review_msg_id=review_msg_id,
-        thread_id=thread_id,
-        found=row is not None,
-        role=row[0] if row is not None else None,
-    )
+        row = result.one_or_none()
+        check_naysayer_review_row(
+            review_msg_id=review_msg_id,
+            thread_id=thread_id,
+            found=row is not None,
+            role=row[0] if row is not None else None,
+        )
+    elif close_sanction.kind == "settled_disposition":
+        head_msg_id = close_sanction.head_msg_id
+        if head_msg_id is None:  # the schema validator requires it for the kind
+            raise AssertionError("settled_disposition sanction without head_msg_id")
+        result = await session.execute(
+            select(
+                Message.role, Message.next_participant, Message.disposition
+            ).where(
+                Message.project == project,
+                Message.thread_id == thread_id,
+                Message.msg_id == head_msg_id,
+            )
+        )
+        row = result.one_or_none()
+        check_settled_disposition_row(
+            head_msg_id=head_msg_id,
+            thread_id=thread_id,
+            last_msg_num=thread.last_msg_num,
+            found=row is not None,
+            role=row[0] if row is not None else None,
+            next_participant=row[1] if row is not None else None,
+            disposition=row[2] if row is not None else None,
+        )
 
 
 async def assert_references_threads_exist(
@@ -840,6 +963,7 @@ async def audit_project(
             pr_gate_ledger=sanctioned_tally["pr_gate_ledger"],
             human_override=sanctioned_tally["human_override"],
             naysayer_approved=sanctioned_tally["naysayer_approved"],
+            settled_disposition=sanctioned_tally["settled_disposition"],
         ),
         unattributable=unattributable,
     )

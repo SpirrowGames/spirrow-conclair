@@ -171,12 +171,15 @@ async def post_message_in_session(
         project=project,
         references_threads=references_threads,
     )
-    # A `naysayer_approved` sanction's evidence is a msg in this thread, so
-    # it is checked here, at the one choke point both close routes share.
+    # A `naysayer_approved` or `settled_disposition` sanction's evidence is a
+    # msg in this thread, so it is checked here, at the one choke point both
+    # close routes share. `thread` is the row locked above, which is what
+    # makes the settled_disposition head comparison a compare-and-set: this
+    # call must stay after the refresh and before `allocate_next_msg_id`.
     await integrity_svc.assert_close_sanction_evidence(
         session,
         project=project,
-        thread_id=thread.thread_id,
+        thread=thread,
         close_sanction=close_sanction,
     )
 

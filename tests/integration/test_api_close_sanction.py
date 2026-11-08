@@ -155,7 +155,8 @@ async def test_ledger_carve_out_is_counted_not_reported(client: AsyncClient) -> 
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
     assert body["sanctioned_counts"] == {
-        "pr_gate_ledger": 1, "human_override": 0, "naysayer_approved": 0
+        "pr_gate_ledger": 1, "human_override": 0, "naysayer_approved": 0,
+        "settled_disposition": 0,
     }
     assert body["unattributable"] == []
 
@@ -177,7 +178,8 @@ async def test_human_force_close_is_counted_not_reported(client: AsyncClient) ->
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
     assert body["sanctioned_counts"] == {
-        "pr_gate_ledger": 0, "human_override": 1, "naysayer_approved": 0
+        "pr_gate_ledger": 0, "human_override": 1, "naysayer_approved": 0,
+        "settled_disposition": 0,
     }
 
 
@@ -223,7 +225,8 @@ async def test_an_owner_closing_their_own_thread_records_nothing(
     body = await _audit(client)
     assert body["issue_count"] == 0
     assert body["sanctioned_counts"] == {
-        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0,
+        "settled_disposition": 0,
     }
     assert body["unattributable"] == []
 
@@ -266,7 +269,8 @@ async def test_owner_self_closes_stay_clean_when_owners_differ(
     assert body["issue_count"] == 0, body["issues"]
     assert body["unattributable"] == []
     assert body["sanctioned_counts"] == {
-        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0,
+        "settled_disposition": 0,
     }
 
 
@@ -464,7 +468,8 @@ async def test_a_legacy_owner_override_is_unclassified_not_corrupt(
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
     assert body["sanctioned_counts"] == {
-        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 0,
+        "settled_disposition": 0,
     }
     assert [u["reason"] for u in body["unattributable"]] == ["unclassified_override"]
 
@@ -626,7 +631,8 @@ async def test_naysayer_approved_close_is_counted_not_reported(
     body = await _audit(client)
     assert body["issue_count"] == 0, body["issues"]
     assert body["sanctioned_counts"] == {
-        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 1
+        "pr_gate_ledger": 0, "human_override": 0, "naysayer_approved": 1,
+        "settled_disposition": 0,
     }
     assert body["unattributable"] == []
 
@@ -682,3 +688,152 @@ async def test_naysayer_approved_without_review_msg_id_is_422(
         },
     )
     assert r.status_code == 422, r.text
+
+
+# ----- settled_disposition (T-done-disposition-auto-close msg-8218 §1,
+# boundary 1a: msg-8185 §A / §B) -----
+
+
+async def _post_done(
+    client: AsyncClient,
+    thread_id: str,
+    *,
+    role: str | None = "proposer",
+    disposition: dict[str, Any] | None = None,
+    next_participant: str | None = None,
+) -> str:
+    payload: dict[str, Any] = {
+        "type": "report",
+        "author": "Bohr",
+        "content": "settled",
+        "disposition": disposition if disposition is not None else {"kind": "done"},
+    }
+    if role is not None:
+        payload["role"] = role
+    if next_participant is not None:
+        payload["next_participant"] = next_participant
+    r = await client.post(f"/v1/projects/p/threads/{thread_id}/messages", json=payload)
+    assert r.status_code == 201, r.text
+    msg_id: str = r.json()["msg"]["msg_id"]
+    return msg_id
+
+
+async def _settled_close(client: AsyncClient, thread_id: str, head_msg_id: str) -> Any:
+    """A non-owner close: the thread is opened by `orchestrator`, and the
+    closer is a different identity, so only the sanction lets it through."""
+    return await client.post(
+        f"/v1/projects/p/threads/{thread_id}/close",
+        json={
+            "summary_content": f"settled_close: carried out the done at {head_msg_id}",
+            "author": "settled-closer",
+            "owner_override": True,
+            "close_sanction": {"kind": "settled_disposition", "head_msg_id": head_msg_id},
+        },
+    )
+
+
+async def _status(client: AsyncClient, thread_id: str) -> str:
+    thread = (await client.get(f"/v1/projects/p/threads/{thread_id}")).json()
+    status: str = thread["thread"]["status"]
+    return status
+
+
+async def test_settled_disposition_close_is_counted_not_reported(
+    client: AsyncClient,
+) -> None:
+    await _open(client, "T-1")
+    head = await _post_done(client, "T-1")
+
+    r = await _settled_close(client, "T-1", head)
+    assert r.status_code == 201, r.text
+    assert await _status(client, "T-1") == "resolved"
+
+    body = await _audit(client)
+    assert body["issue_count"] == 0, body["issues"]
+    assert body["sanctioned_counts"] == {
+        "pr_gate_ledger": 0,
+        "human_override": 0,
+        "naysayer_approved": 0,
+        "settled_disposition": 1,
+    }
+    assert body["unattributable"] == []
+
+    events = (await client.get("/v1/projects/p/events")).json()["items"]
+    (carrying,) = [e for e in events if "close_sanction" in e["details"]]
+    assert carrying["details"]["close_sanction"] == {
+        "kind": "settled_disposition", "head_msg_id": head
+    }
+
+
+async def test_a_reply_after_the_done_moves_the_head_and_refuses_the_close(
+    client: AsyncClient,
+) -> None:
+    """The compare-and-set: an objection posted after the settlement wins."""
+    await _open(client, "T-1")
+    head = await _post_done(client, "T-1")
+    await _post(client, "T-1", author="Einstein", role="naysayer")
+
+    r = await _settled_close(client, "T-1", head)
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["error_type"] == "ChatroomUnprocessableError"
+    assert body["details"]["reason"] == "head_moved"
+    assert body["details"]["head_msg_id"] == head
+    assert await _status(client, "T-1") != "resolved"
+
+
+async def test_settled_disposition_naming_another_threads_msg_is_422(
+    client: AsyncClient,
+) -> None:
+    await _open(client, "T-1")
+    await _open(client, "T-2")
+    elsewhere = await _post_done(client, "T-2")
+
+    r = await _settled_close(client, "T-1", elsewhere)
+    assert r.status_code == 422, r.text
+    assert r.json()["details"]["reason"] == "not_in_thread"
+    assert r.json()["details"]["thread_id"] == "T-1"
+    assert await _status(client, "T-1") != "resolved"
+
+
+@pytest.mark.parametrize("role", ["naysayer", "implementer", None])
+async def test_a_done_by_an_ineligible_role_is_422(
+    client: AsyncClient, role: str | None
+) -> None:
+    await _open(client, "T-1")
+    head = await _post_done(client, "T-1", role=role)
+
+    r = await _settled_close(client, "T-1", head)
+    assert r.status_code == 422, r.text
+    assert r.json()["details"]["reason"] == "role_not_eligible"
+    assert await _status(client, "T-1") != "resolved"
+
+
+async def test_a_done_that_names_a_successor_is_422(client: AsyncClient) -> None:
+    """Constructible through the API: invariant 7 refuses a successor only on
+    a msg that *closes* its thread, and this head does not."""
+    await _open(client, "T-1")
+    head = await _post_done(client, "T-1", next_participant="Heisenberg")
+
+    r = await _settled_close(client, "T-1", head)
+    assert r.status_code == 422, r.text
+    assert r.json()["details"]["reason"] == "names_successor"
+    assert await _status(client, "T-1") != "resolved"
+
+
+async def test_a_head_that_is_not_done_is_422(client: AsyncClient) -> None:
+    await _open(client, "T-1")
+    head = await _post_done(
+        client,
+        "T-1",
+        disposition={
+            "kind": "blocked_on",
+            "trigger": {"arm": "pr", "ref": "SpirrowGames/x#1"},
+            "wake": "Bohr",
+        },
+    )
+
+    r = await _settled_close(client, "T-1", head)
+    assert r.status_code == 422, r.text
+    assert r.json()["details"]["reason"] == "not_done"
+    assert await _status(client, "T-1") != "resolved"

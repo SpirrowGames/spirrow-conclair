@@ -49,7 +49,9 @@ class ChatroomUnprocessableError(ChatroomError):
     payload asserts something that is not so. The difference is only that
     answering needs a DB read, so pydantic cannot do it. Currently raised
     for a ``naysayer_approved`` close sanction whose ``review_msg_id`` is
-    not a naysayer msg in the closed thread
+    not a naysayer msg in the closed thread, and for a
+    ``settled_disposition`` close sanction whose ``head_msg_id`` is not the
+    closed thread's current head, or not a proposer's ``done``
     (``services.integrity.assert_close_sanction_evidence``).
 
     Not a ``ChatroomIntegrityError`` subclass on purpose: that would inherit

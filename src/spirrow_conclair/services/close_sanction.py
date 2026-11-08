@@ -100,6 +100,17 @@ CLOSE_SANCTION_KEY = "close_sanction"
 #: `api/projects.py` already knows the `gate:naysayer` tag.
 NAYSAYER_ROLE = "naysayer"
 
+#: The persisted `messages.role` the head msg named by a `settled_disposition`
+#: sanction's `head_msg_id` must carry. Only a proposer's settlement may be
+#: carried out by a non-owner: ADR-2026-05-29-10 (chatroom
+#: `spirrow-mindwire/T-T29-role-registry` msg-309) gives the naysayer no close
+#: authority, so closing on a naysayer's `done` would hand it one indirectly;
+#: an implementer's `done` is a self-assessment of its own work; and a human
+#: can already force-close. One role, so the client (mindwire settled_close)
+#: and the server agree on the set (chatroom
+#: `spirrow-mindwire/T-done-disposition-auto-close` msg-8185 Obj-5-1).
+SETTLED_DISPOSITION_ROLE = "proposer"
+
 #: Recorded when a caller passes only the legacy `owner_override` boolean.
 UNSPECIFIED_SANCTION: dict[str, Any] = {"kind": "unspecified"}
 
@@ -112,6 +123,7 @@ __all__ = [
     "CloseSanctionKind",
     "CloseVerdict",
     "NAYSAYER_ROLE",
+    "SETTLED_DISPOSITION_ROLE",
     "SanctionRecord",
     "UNSPECIFIED_SANCTION",
     "UnattributableReason",

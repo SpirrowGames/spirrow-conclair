@@ -20,6 +20,7 @@ same cases end to end against Postgres in CI.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, get_args
 
 import pytest
@@ -127,6 +128,7 @@ def _constructed(kind: str) -> CloseSanction:
         merged_head=None,
         approving_review_id=None,
         review_msg_id=None,
+        head_msg_id=None,
     )
 
 
@@ -208,7 +210,7 @@ async def _check(session: _RecordingSession, sanction: CloseSanction | None) -> 
     await assert_close_sanction_evidence(
         session,  # type: ignore[arg-type]
         project="p",
-        thread_id="T-1",
+        thread=SimpleNamespace(thread_id="T-1", last_msg_num=2),  # type: ignore[arg-type]
         close_sanction=sanction,
     )
 

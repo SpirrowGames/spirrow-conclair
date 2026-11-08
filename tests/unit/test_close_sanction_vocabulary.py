@@ -107,6 +107,8 @@ def test_every_kind_passes_close_sanction_validation(kind: CloseSanctionKind) ->
         payload["approving_review_id"] = "PRR_1"
     elif kind == "naysayer_approved":
         payload["review_msg_id"] = "msg-002"
+    elif kind == "settled_disposition":
+        payload["head_msg_id"] = "msg-003"
     # "unspecified" carries no evidence.
 
     sanction = CloseSanction(**payload)
