@@ -35,6 +35,14 @@ a4e3bfa on PR #34, CI run 42464732940), both tests here failed at the probe
 passed. These two tests are therefore the integration-level pin on the lock.
 The static pin is `tests/unit/test_row_lock_is_at_the_choke_point.py`.
 
+Failure containment: each request task is started through
+`_requests_contained()`. If the probe or an assertion fails while the holder
+is open, the holder rolls back first, and then every request task that has not
+finished is cancelled and awaited before the failure propagates -- so no
+request is left running into fixture teardown (PR-gate advisory on #34 @
+7435e82). On the passing path the test body awaits the task itself, and the
+helper has nothing left to do.
+
 Deadlock note: unlike the barrier tests in `test_api_double_close_race.py`,
 the holder here is not a task waiting on the other task -- it is this test
 body, which releases by committing. The waiter blocks inside Postgres, not
@@ -44,6 +52,8 @@ inside the event loop, so nothing is circular.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
@@ -181,6 +191,34 @@ def _assert_row_lock_wait(blocked: dict[str, Any]) -> None:
     assert "FOR UPDATE" in blocked["query"].upper(), blocked
 
 
+@contextlib.asynccontextmanager
+async def _requests_contained() -> AsyncIterator[
+    Callable[[Coroutine[Any, Any, Response]], asyncio.Task[Response]]
+]:
+    """Yield a task starter; on a failure, cancel and await what it started.
+
+    Only the failure path does anything: if the body raises, each started task
+    that is still running is cancelled, and every started task is awaited
+    (its own outcome swallowed) before the body's exception propagates. The
+    body's exception is the one reported, not a side effect of the cleanup.
+    """
+    tasks: list[asyncio.Task[Response]] = []
+
+    def start(coro: Coroutine[Any, Any, Response]) -> asyncio.Task[Response]:
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    try:
+        yield start
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def _thread_view(client: AsyncClient, thread_id: str) -> dict[str, Any]:
     r = await client.get(f"/v1/projects/p/threads/{thread_id}?mode=full")
     assert r.status_code == 200, r.text
@@ -198,33 +236,34 @@ async def test_a_close_waiting_behind_an_uncommitted_reply_sees_head_moved(
     await _open(client, "T-1")
     head = await _post_done(client, "T-1")
 
-    async with session_factory() as reply_session:
-        async with reply_session.begin():
-            holder_pid = await _backend_pid(reply_session)
-            thread = await fetch_thread_or_raise(reply_session, project="p", thread_id="T-1")
-            reply, _ = await post_message_in_session(
-                reply_session,
-                project="p",
-                thread=thread,
-                msg_type="report",
-                author="Einstein",
-                role="naysayer",
-                content="objection to the settlement",
-            )
-
-            close_task = asyncio.create_task(
-                client.post(
-                    "/v1/projects/p/threads/T-1/close",
-                    json=_settled_close_payload(head),
+    async with _requests_contained() as start_request:
+        async with session_factory() as reply_session:
+            async with reply_session.begin():
+                holder_pid = await _backend_pid(reply_session)
+                thread = await fetch_thread_or_raise(reply_session, project="p", thread_id="T-1")
+                reply, _ = await post_message_in_session(
+                    reply_session,
+                    project="p",
+                    thread=thread,
+                    msg_type="report",
+                    author="Einstein",
+                    role="naysayer",
+                    content="objection to the settlement",
                 )
-            )
-            blocked = await _wait_until_blocked_by(session_factory, holder_pid, close_task)
-            _assert_row_lock_wait(blocked)
-            # Still blocked: nothing has been decided yet.
-            assert not close_task.done()
-        # The reply commits here, releasing the row.
 
-    resp = await asyncio.wait_for(close_task, timeout=PROBE_DEADLINE_SEC)
+                close_task = start_request(
+                    client.post(
+                        "/v1/projects/p/threads/T-1/close",
+                        json=_settled_close_payload(head),
+                    )
+                )
+                blocked = await _wait_until_blocked_by(session_factory, holder_pid, close_task)
+                _assert_row_lock_wait(blocked)
+                # Still blocked: nothing has been decided yet.
+                assert not close_task.done()
+            # The reply commits here, releasing the row.
+
+        resp = await asyncio.wait_for(close_task, timeout=PROBE_DEADLINE_SEC)
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["error_type"] == "ChatroomUnprocessableError"
@@ -257,41 +296,42 @@ async def test_a_reply_waiting_behind_an_uncommitted_close_is_refused(
     await _open(client, "T-1")
     head = await _post_done(client, "T-1")
 
-    async with session_factory() as close_session:
-        async with close_session.begin():
-            holder_pid = await _backend_pid(close_session)
-            thread = await fetch_thread_or_raise(close_session, project="p", thread_id="T-1")
-            close_msg, transition = await post_message_in_session(
-                close_session,
-                project="p",
-                thread=thread,
-                msg_type="decide",
-                author="settled-closer",
-                content=f"settled_close: carried out the done at {head}",
-                closes_thread="T-1",
-                owner_override=True,
-                close_sanction=CloseSanction(kind="settled_disposition", head_msg_id=head),
-            )
-            # The comparison ran under the lock and passed: head is current.
-            assert transition == "resolved"
-
-            reply_task = asyncio.create_task(
-                client.post(
-                    "/v1/projects/p/threads/T-1/messages",
-                    json={
-                        "type": "report",
-                        "author": "Einstein",
-                        "role": "naysayer",
-                        "content": "objection, too late",
-                    },
+    async with _requests_contained() as start_request:
+        async with session_factory() as close_session:
+            async with close_session.begin():
+                holder_pid = await _backend_pid(close_session)
+                thread = await fetch_thread_or_raise(close_session, project="p", thread_id="T-1")
+                close_msg, transition = await post_message_in_session(
+                    close_session,
+                    project="p",
+                    thread=thread,
+                    msg_type="decide",
+                    author="settled-closer",
+                    content=f"settled_close: carried out the done at {head}",
+                    closes_thread="T-1",
+                    owner_override=True,
+                    close_sanction=CloseSanction(kind="settled_disposition", head_msg_id=head),
                 )
-            )
-            blocked = await _wait_until_blocked_by(session_factory, holder_pid, reply_task)
-            _assert_row_lock_wait(blocked)
-            assert not reply_task.done()
-        # The close commits here.
+                # The comparison ran under the lock and passed: head is current.
+                assert transition == "resolved"
 
-    resp = await asyncio.wait_for(reply_task, timeout=PROBE_DEADLINE_SEC)
+                reply_task = start_request(
+                    client.post(
+                        "/v1/projects/p/threads/T-1/messages",
+                        json={
+                            "type": "report",
+                            "author": "Einstein",
+                            "role": "naysayer",
+                            "content": "objection, too late",
+                        },
+                    )
+                )
+                blocked = await _wait_until_blocked_by(session_factory, holder_pid, reply_task)
+                _assert_row_lock_wait(blocked)
+                assert not reply_task.done()
+            # The close commits here.
+
+        resp = await asyncio.wait_for(reply_task, timeout=PROBE_DEADLINE_SEC)
     assert resp.status_code == 409, resp.text
     body = resp.json()
     assert body["error_type"] == "ChatroomThreadResolvedError"
