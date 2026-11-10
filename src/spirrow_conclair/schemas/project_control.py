@@ -1,18 +1,20 @@
 """Schemas for the per-project loop control endpoints.
 
-Four endpoints land here:
+Six endpoints land here:
 - ``GET  /v1/projects/{project}/control``           (``ControlStateResponse``)
 - ``PUT  /v1/projects/{project}/control``           (``SetControlRequest``)
 - ``POST /v1/projects/{project}/control/observed``  (``ReportObservedRequest``)
 - ``GET  /v1/projects/{project}/control/history``   (``ControlHistoryListResponse``)
+- ``PUT  /v1/projects/{project}/control/summon``          (``SummonRequest``)
+- ``POST /v1/projects/{project}/control/summon/clear``    (``SummonRequest``)
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 #: Mirrors ``models.project_control.CONTROL_STATES``. Declared as a
 #: Literal so FastAPI rejects an unknown value with 422 before the route
@@ -50,6 +52,42 @@ class ReportObservedRequest(BaseModel):
     actor: str = Field(min_length=1, max_length=200)
 
 
+class SummonRequest(BaseModel):
+    """PUT /control/summon and POST /control/summon/clear body.
+
+    ``thread_id`` and ``by`` have no length constraint here on purpose: a
+    blank or whitespace-only value must come back as 422 with
+    ``error_type = "invalid_argument"`` (the Summon contract), which the
+    route raises itself, not as FastAPI's generic ``ValidationError``.
+    ``by`` is a record of who said they did it, not a credential.
+    ``note`` is optional and kept in ``project_summon_history``; Magickit's
+    ``summon_set`` / ``summon_clear`` send it.
+    """
+
+    thread_id: str = Field(max_length=200)
+    by: str = Field(max_length=200)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class ActiveSummon(BaseModel):
+    """The project's Summon, as ``active_summon`` in the control response.
+
+    ``since`` is rendered as UTC with an explicit ``+00:00`` offset and
+    exactly six fractional digits (msg-1435), not pydantic's default ``Z``
+    with a variable fraction. Both satisfy the contract fixture
+    (``tests/data/summon/active_summon_contract.json``); the fixed form is
+    the one this server promises.
+    """
+
+    thread_id: str
+    since: datetime
+    by: str
+
+    @field_serializer("since")
+    def _since_utc_micro(self, value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
 class ControlStateResponse(BaseModel):
     """Current control state for a project.
 
@@ -74,6 +112,8 @@ class ControlStateResponse(BaseModel):
     observed_actor: str | None
     observed_at: datetime | None
     configured: bool
+    #: Always present; ``null`` means no Summon (contract case "null").
+    active_summon: ActiveSummon | None
 
 
 class ControlHistoryItem(BaseModel):

@@ -240,12 +240,27 @@ def _count_row_lock_calls(src: str) -> int:
     return len(_collect_row_lock_sites(src))
 
 
+#: The Summon endpoints' locks (T-conclair-active-summon; spec magickit
+#: msg-1439 v1.2.2). They live in ``api/control.py`` and are pinned on their
+#: own, exactly, by ``test_summon_locks_are_exactly_the_two_the_spec_orders``
+#: below -- they are not exempted, they are a second, separately stated
+#: invariant. Neither is a message-write lock: one is ``FOR SHARE`` on the
+#: thread row (it holds a thread's status still while a Summon is set, and a
+#: close's ``FOR UPDATE`` queues behind it -- the order the spec wants), the
+#: other is ``FOR UPDATE`` on ``project_control``, not on ``threads``. The
+#: message-write choke point below stays exactly one site.
+_SUMMON_LOCK_FILE = _SRC_ROOT / "api" / "control.py"
+
+
 def _call_sites() -> list[tuple[Path, list[_RowLockSite]]]:
     """Every source file under ``src/spirrow_conclair`` whose AST holds a
-    row-lock call, with the sites found in it.
+    row-lock call, with the sites found in it -- except the Summon file,
+    which ``test_summon_locks_are_exactly_the_two_the_spec_orders`` pins.
     """
     hits: list[tuple[Path, list[_RowLockSite]]] = []
     for path in _SRC_ROOT.rglob("*.py"):
+        if path.resolve() == _SUMMON_LOCK_FILE.resolve():
+            continue
         src = path.read_text(encoding="utf-8")
         sites = _collect_row_lock_sites(src)
         if sites:
@@ -344,6 +359,42 @@ def test_the_one_row_lock_call_asks_for_it_unconditionally() -> None:
         "``post_message_in_session`` together -- do not change the call "
         "alone."
     )
+
+
+def test_summon_locks_are_exactly_the_two_the_spec_orders() -> None:
+    """``api/control.py`` holds exactly two lock calls, in exactly these shapes.
+
+    1. ``select(Thread)....with_for_update(read=True)`` in ``set_summon`` --
+       ``FOR SHARE`` on the thread row, taken first.
+    2. ``select(ProjectControl)....with_for_update()`` in ``_lock_control`` --
+       ``FOR UPDATE`` on the project's control row, taken second.
+
+    That order (thread, then control) is the one the DB triggers on
+    ``threads`` follow too, which is what keeps a PUT and a status change /
+    DELETE of the same thread from inverting lock order. A third lock here,
+    a ``FOR UPDATE`` on ``threads``, or a changed shape fails this test; so
+    would a lock moving out of this file, through the site test above.
+    """
+    tree = ast.parse(_SUMMON_LOCK_FILE.read_text(encoding="utf-8"))
+    found: list[tuple[str, str]] = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            is_method = isinstance(node.func, ast.Attribute) and node.func.attr == "with_for_update"
+            is_kw = any(kw.arg == "with_for_update" for kw in node.keywords)
+            if is_method or is_kw:
+                found.append((func.name, ast.unparse(node)))
+
+    assert len(found) == 2, found
+    by_func = dict(found)
+    assert set(by_func) == {"set_summon", "_lock_control"}, found
+    assert "select(Thread)" in by_func["set_summon"], found
+    assert by_func["set_summon"].endswith(".with_for_update(read=True)"), found
+    assert "select(ProjectControl)" in by_func["_lock_control"], found
+    assert by_func["_lock_control"].endswith(".with_for_update()"), found
 
 
 def test_ast_counter_ignores_the_phrase_in_docstrings_and_strings() -> None:

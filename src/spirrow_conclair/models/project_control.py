@@ -40,6 +40,16 @@ CONTROL_STATES = ("run", "supervised", "hold")
 #: GET never 404s and the Magickit tools never fabricate a default.
 DEFAULT_CONTROL_STATE = "run"
 
+#: Thread statuses under which a thread may hold a Summon. A thread leaving
+#: this set (or being deleted) loses its mark through the DB triggers added in
+#: alembic revision 0011; ``PUT /control/summon`` refuses a thread outside it
+#: with 409 ``summon_thread_not_open``. The same tuple is frozen into the
+#: migration's SQL function, and an integration test compares the two.
+SUMMON_OPEN_STATUSES = ("active", "awaiting_reply")
+
+#: History actions for ``project_summon_history``.
+SUMMON_ACTIONS = ("set", "clear")
+
 
 class ProjectControl(Base):
     __tablename__ = "project_control"
@@ -55,6 +65,16 @@ class ProjectControl(Base):
     observed_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )
+    # Summon (revision 0011). All three NULL = no Summon; all three set =
+    # one. The CHECK below forbids anything in between. Written only by
+    # PUT /control/summon, POST /control/summon/clear and the
+    # ``clear_active_summon`` trigger function -- never by the desired /
+    # observed endpoints.
+    active_summon_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active_summon_since: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    active_summon_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -64,6 +84,14 @@ class ProjectControl(Base):
         CheckConstraint(
             f"observed_state IS NULL OR observed_state IN {CONTROL_STATES}",
             name="project_control_observed_check",
+        ),
+        CheckConstraint(
+            "(active_summon_thread_id IS NULL AND active_summon_since IS NULL"
+            " AND active_summon_by IS NULL)"
+            " OR (active_summon_thread_id IS NOT NULL AND active_summon_since IS NOT NULL"
+            " AND active_summon_by IS NOT NULL"
+            " AND btrim(active_summon_thread_id) <> '' AND btrim(active_summon_by) <> '')",
+            name="project_control_active_summon_check",
         ),
     )
 
@@ -97,4 +125,35 @@ class ProjectControlHistory(Base):
             name="project_control_history_state_check",
         ),
         Index("idx_control_history_project", "project", "changed_at"),
+    )
+
+
+class ProjectSummonHistory(Base):
+    """Append-only record of Summon set / clear.
+
+    Kept apart from ``ProjectControlHistory``: that table's ``state`` is
+    CHECKed to the desired-state vocabulary and answers a different question.
+    ``actor`` is a record, not a credential; trigger-driven clears write
+    ``system:status:<new_status>`` or ``system:thread_deleted``.
+    ``note`` carries the optional reason Magickit's summon tools send.
+    """
+
+    __tablename__ = "project_summon_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            f"action IN {SUMMON_ACTIONS}",
+            name="project_summon_history_action_check",
+        ),
+        Index("idx_summon_history_project", "project", "changed_at"),
     )

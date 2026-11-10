@@ -73,6 +73,8 @@ cursor-based ではなく offset-based。理由:
 | 409 | `ChatroomIntegrityError` | invariant 違反 (FK / 重複 / 順序制約) |
 | 409 | `ChatroomStateError` | 状態遷移不正 (parked / superseded への close 等) |
 | 409 | `ChatroomThreadResolvedError` | resolved thread への書き込み (resolved の再 closeを含む)。`ChatroomStateError` の subclass なので 409 のまま |
+| 409 | `summon_conflict` / `summon_mismatch` / `summon_thread_not_open` | Summon の書き込み拒否 (§3.10)。`error_type` と `details.code` の両方にコードが入る |
+| 422 | `invalid_argument` | Summon の `thread_id` / `by` が空または空白だけ (§3.10)。`details.fields` に該当フィールド |
 | 422 | `ValidationError` | pydantic schema validation (FastAPI default) |
 | 500 | `ChatroomDBError` | DB エラー |
 | 503 | `ServiceUnavailable` | DB 接続不能 (health check で出る) |
@@ -703,6 +705,56 @@ LLM 呼び出しが 1 回増えるだけ ∴ 素直に分ける:
 |---|---|
 | thread が存在しない | **404** (`get_thread` と一致させる) |
 | thread はあるが digest 無し | **200** + `present: false` + `digest: null` |
+
+### 3.10 Summon — `active_summon` / PUT `.../control/summon` / POST `.../control/summon/clear`
+
+出典: spirrow-magickit `T-human-call-summon-server-side` msg-1435 / 1437 / 1439 / 1440、
+本 repo の `T-conclair-active-summon`。Summon は「この 1 本を先にやる」という人の印で、
+project ごとに最大 1 本。`project_control` 行の 3 列に保存する (alembic 0011)。
+
+**GET `/v1/projects/{project}/control`** (および PUT `/control`・POST `/control/observed` の応答) は
+`active_summon` を**常に**返す。印が無ければ `null`:
+
+```json
+"active_summon": {"thread_id": "T-a", "since": "2026-10-09T01:02:03.123456+00:00", "by": "takahito"}
+```
+
+`since` は UTC・`+00:00`・小数 6 桁で固定。契約は `tests/data/summon/active_summon_contract.json`
+(spirrow-mindwire 正本のバイト一致コピー)。
+
+**PUT `/v1/projects/{project}/control/summon`** — body `{thread_id, by, note?}`
+
+| ケース | status / code | 印・history |
+|---|---|---|
+| `thread_id` / `by` が空・空白だけ | 422 `invalid_argument` | 変えない |
+| thread が無い・別 project の thread | 404 `ChatroomNotFoundError` | 変えない (control 行も作らない) |
+| thread の status が `active` / `awaiting_reply` 以外 | 409 `summon_thread_not_open` | 変えない |
+| 印なし | 200 | 3 列を書き、history に `set` |
+| 同じ thread_id の印あり | 200 (冪等) | `since` / `by` / history とも変えない |
+| 別の thread_id の印あり | 409 `summon_conflict` (`details.active_summon` に現在の印) | 変えない |
+
+**POST `/v1/projects/{project}/control/summon/clear`** — body `{thread_id, by, note?}`、compare-and-clear
+
+| ケース | status / code | 印・history |
+|---|---|---|
+| 空・空白だけ | 422 `invalid_argument` | 変えない |
+| 印なし (行なしを含む) | 200 | 何もしない (行も作らない) |
+| 印の thread_id と違う | 409 `summon_mismatch` (`details.active_summon` に現在の印) | 変えない |
+| 一致 | 200 | 3 列を NULL、history に `clear` |
+
+**自動解除 (DB trigger)**: `threads` の status が `active` / `awaiting_reply` 以外 (NULL を含む) に
+変わると同じトランザクションで印を外し、history の actor は `system:status:<new_status>`
+(NULL は `<null>`)。thread の DELETE では `system:thread_deleted`。`STOP: done` では外れない
+(status を変えないため)。
+
+**ロック順序**: PUT は thread 行 FOR SHARE → control 行 FOR UPDATE。trigger も thread 行を
+持った状態で control 行を FOR UPDATE するので、**同じ 1 本の thread をめぐる** PUT と
+status 更新・DELETE の間ではロック順序が逆転しない。複数の thread を終了させる
+トランザクション同士はデッドロックし得る (PG が片方を rollback し、印が中途半端に
+残ることはない)。
+
+**既知の特性**: thread を終了・削除するたびに、印の有無に関係なくその project の control 行に
+FOR UPDATE がかかる。同じ project 内の thread 終了操作と HOLD/RESUME は互いに直列になる。
 
 ---
 
