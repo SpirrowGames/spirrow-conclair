@@ -3,9 +3,10 @@
 The rule-by-rule matrix (every fixed column, every kind) is in
 ``tests/unit/test_agent_session.py``, against the pure ``plan_declare``. This
 file pins what only a real Postgres can show: the row really is one row,
-a refusal really writes nothing, the CHECK really refuses a loop row without
-a session id, and two simultaneous ``start`` declarations neither duplicate
-the row nor raise.
+a refusal really writes nothing, a new loop row without a session id gets
+the named 409 rather than the DB CHECK's integrity error (the CHECK itself is
+pinned on raw SQL in ``test_migration_agent_sessions.py``), and two
+simultaneous ``start`` declarations neither duplicate the row nor raise.
 """
 
 from __future__ import annotations
@@ -166,9 +167,19 @@ async def test_loop_row_with_matching_session_id_takes_transcript(client: AsyncC
 async def test_loop_insert_without_session_id_is_refused(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
+    """msg-1556: the same named 409 as a mismatch on an existing loop row.
+
+    The service refuses before the INSERT, so the DB CHECK (pinned on raw SQL
+    in test_migration_agent_sessions.py) is never what answers here.
+    """
     body = {k: v for k, v in LOOP.items() if k != "mindwire_session_id"}
     r = await _put(client, "u-1", body, "start")
-    assert r.status_code == 409
+    assert r.status_code == 409, r.text
+    assert r.json()["error_type"] == "ChatroomSessionConflictError"
+    assert r.json()["details"] == {
+        "field": "mindwire_session_id",
+        "reason": "session_id_mismatch",
+    }
     assert await _count(db_session, "u-1") == 0
 
 

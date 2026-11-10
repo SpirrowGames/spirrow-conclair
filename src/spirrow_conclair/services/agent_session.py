@@ -17,6 +17,11 @@ There are two layers:
 ``derive_board_state`` is the part of the D7 state mapping that Conclair
 owns. It is computed on read and never stored.
 
+For a missing row, one rule applies before the INSERT is built: a
+``source='loop'`` declaration without ``mindwire_session_id`` is refused as
+``session_id_mismatch`` (the same envelope as rule 1 below). The CHECK in
+``0011`` still backs it at the DB.
+
 Rules, in evaluation order, for an existing row (msg-1320 §2 with msg-1322):
 
 1. ``source='loop'`` row: the request's ``mindwire_session_id`` must equal the
@@ -111,6 +116,14 @@ def plan_declare(
     if row is None:
         if uuid is None:
             raise ValueError("uuid is required to plan an insert")
+        # 0. A new loop row must carry its session id. Refuse it here, before
+        #    any INSERT is issued, so the caller gets the same named 409 and
+        #    ``{field, reason}`` details as a mismatch on an existing loop row.
+        #    The DB CHECK (0011) stays as the last line of defence; without
+        #    this branch it would answer with ChatroomIntegrityError and the
+        #    raw constraint text instead (msg-1553 / msg-1556).
+        if req.source == "loop" and req.mindwire_session_id is None:
+            raise _conflict("mindwire_session_id", "session_id_mismatch")
         return _insert_values(uuid, req, now)
 
     # 1. Loop rows: the session id gates every kind, and it is checked first.

@@ -239,6 +239,23 @@ def test_loop_row_requires_matching_session_id(kind: str, presented: str | None)
     assert row.ended_at is None
 
 
+def test_new_loop_row_without_session_id_is_a_named_conflict() -> None:
+    """msg-1556: refused in the service, before any INSERT, not by the DB CHECK."""
+    base = {k: v for k, v in LOOP_BASE.items() if k != "mindwire_session_id"}
+    for kind in ("start", "declare", "end"):
+        with pytest.raises(ChatroomSessionConflictError) as info:
+            plan_declare(None, _req(base, kind), T0, uuid="u-1")
+        assert info.value.details == {
+            "field": "mindwire_session_id",
+            "reason": "session_id_mismatch",
+        }
+
+
+def test_new_hook_row_without_session_id_is_accepted() -> None:
+    values = plan_declare(None, _req(HOOK_BASE, "start"), T0, uuid="u-1")
+    assert values["mindwire_session_id"] is None
+
+
 def test_loop_session_id_is_checked_before_fixed_columns() -> None:
     """Even a request that also changes a fixed column reports the mismatch."""
     row = _row(LOOP_BASE)
