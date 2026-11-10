@@ -37,6 +37,14 @@ What this adds:
    control-row lock, so in one project those operations and HOLD / RESUME
    are serialized with each other.
 
+   Isolation boundary: the function refuses (SQLSTATE 0A000,
+   feature_not_supported) to run outside READ COMMITTED. At REPEATABLE READ
+   or above, a control row a concurrent PUT created after the caller's
+   snapshot is invisible to the lookup, and the thread would end with its
+   mark left on. So any status change out of the open set, and any DELETE,
+   on ``threads`` must run at READ COMMITTED (Conclair's own writes do); at
+   other levels the statement fails and its transaction rolls back.
+
 ``SUMMON_OPEN_STATUSES`` below is written into the SQL function and must
 equal ``models.project_control.SUMMON_OPEN_STATUSES``; an integration test
 reads the deployed function body and compares.
@@ -114,7 +122,19 @@ def upgrade() -> None:
         AS $$
         DECLARE
             v_current text;
+            v_isolation text := current_setting('transaction_isolation');
         BEGIN
+            -- READ COMMITTED only. Under REPEATABLE READ / SERIALIZABLE a
+            -- control row created after the snapshot is invisible here, so
+            -- the lookup below would find nothing and the thread would end
+            -- with its mark still set. Refuse the whole statement instead:
+            -- the error rolls the status change / DELETE back with it.
+            IF v_isolation <> 'read committed' THEN
+                RAISE EXCEPTION 'Summon auto-clear needs READ COMMITTED, got %',
+                    v_isolation
+                    USING ERRCODE = 'feature_not_supported',
+                          HINT = 'End or delete threads at READ COMMITTED.';
+            END IF;
             -- Lock by project alone, then compare in PL/pgSQL (msg-1439):
             -- the lock is taken whether or not this thread holds the mark.
             SELECT active_summon_thread_id INTO v_current

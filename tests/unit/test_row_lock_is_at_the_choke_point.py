@@ -365,15 +365,16 @@ def test_summon_locks_are_exactly_the_two_the_spec_orders() -> None:
     """``api/control.py`` holds exactly two lock calls, in exactly these shapes.
 
     1. ``select(Thread)....with_for_update(read=True)`` in ``set_summon`` --
-       ``FOR SHARE`` on the thread row, taken first.
+       ``FOR SHARE`` on the thread row.
     2. ``select(ProjectControl)....with_for_update()`` in ``_lock_control`` --
-       ``FOR UPDATE`` on the project's control row, taken second.
+       ``FOR UPDATE`` on the project's control row.
 
-    That order (thread, then control) is the one the DB triggers on
-    ``threads`` follow too, which is what keeps a PUT and a status change /
-    DELETE of the same thread from inverting lock order. A third lock here,
-    a ``FOR UPDATE`` on ``threads``, or a changed shape fails this test; so
-    would a lock moving out of this file, through the site test above.
+    This test pins the lock SITES and MODES only. The order they are taken
+    in (thread first, then control, as the triggers on ``threads`` do) is
+    pinned by ``test_set_summon_takes_the_thread_lock_before_touching_control``
+    below. A third lock here, a ``FOR UPDATE`` on ``threads``, or a changed
+    shape fails this test; so would a lock moving out of this file, through
+    the site test above.
     """
     tree = ast.parse(_SUMMON_LOCK_FILE.read_text(encoding="utf-8"))
     found: list[tuple[str, str]] = []
@@ -395,6 +396,48 @@ def test_summon_locks_are_exactly_the_two_the_spec_orders() -> None:
     assert by_func["set_summon"].endswith(".with_for_update(read=True)"), found
     assert "select(ProjectControl)" in by_func["_lock_control"], found
     assert by_func["_lock_control"].endswith(".with_for_update()"), found
+
+
+def test_set_summon_takes_the_thread_lock_before_touching_control() -> None:
+    """The ORDER, checked separately from the shapes above (PR-gate round 1,
+    objection 2: the shape test alone would pass with the two swapped).
+
+    ``set_summon`` is straight-line code up to its control-row work, so
+    source order is execution order there: the thread ``FOR SHARE`` call must
+    come before every call that reads, inserts or locks ``project_control``
+    (``_lock_control``, ``_fetch``, ``pg_insert``), and ``_lock_control`` must
+    be called exactly once. Moving ``await _lock_control(...)`` above the
+    thread query fails this test. The behavioural evidence for what the order
+    buys is in ``tests/integration/test_summon_lock_order.py``.
+    """
+    tree = ast.parse(_SUMMON_LOCK_FILE.read_text(encoding="utf-8"))
+    (func,) = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "set_summon"
+    ]
+
+    def _callee(node: ast.Call) -> str | None:
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return None
+
+    calls = [n for n in ast.walk(func) if isinstance(n, ast.Call)]
+    thread_lock = [n.lineno for n in calls if _callee(n) == "with_for_update"]
+    control_touch = [
+        n.lineno for n in calls if _callee(n) in {"_lock_control", "_fetch", "pg_insert"}
+    ]
+    lock_control = [n for n in calls if _callee(n) == "_lock_control"]
+
+    assert len(thread_lock) == 1, thread_lock
+    assert len(lock_control) == 1, [n.lineno for n in lock_control]
+    assert control_touch, "set_summon no longer touches project_control?"
+    assert thread_lock[0] < min(control_touch), (
+        f"thread FOR SHARE at line {thread_lock[0]} must precede every "
+        f"project_control access (lines {sorted(control_touch)})"
+    )
 
 
 def test_ast_counter_ignores_the_phrase_in_docstrings_and_strings() -> None:

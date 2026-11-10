@@ -22,7 +22,6 @@ PostgreSQL's detector then rolls one back. That is not tested here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -30,7 +29,6 @@ from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -42,15 +40,6 @@ P = "lk-proj"
 PROBE_DEADLINE_SEC = 15.0
 
 SessionFactory = async_sessionmaker[AsyncSession]
-
-
-@pytest.fixture
-async def rr_engine(database_url: str) -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(database_url, isolation_level="REPEATABLE READ")
-    try:
-        yield engine
-    finally:
-        await engine.dispose()
 
 
 async def _open(client: AsyncClient, thread_id: str) -> None:
@@ -270,50 +259,121 @@ async def test_clear_queued_behind_an_uncommitted_delete_finds_nothing_to_clear(
 
 
 # 4 ---------------------------------------------------------------------------
+#
+# Isolation boundary (PR-gate round 1, objection 1). At REPEATABLE READ or
+# above, a control row created by a PUT after the caller's snapshot is
+# invisible to ``clear_active_summon``'s lookup, so the thread would end with
+# its mark still on. The function therefore refuses to run outside READ
+# COMMITTED, and the refusal rolls the ending statement's transaction back.
+
+REFUSAL = "Summon auto-clear needs READ COMMITTED"
+
+_END_STATEMENTS = {
+    "resolve": [
+        "UPDATE threads SET status = 'resolved' WHERE project = :p AND thread_id = 'T-a'",
+    ],
+    "delete": [
+        "DELETE FROM messages WHERE project = :p AND thread_id = 'T-a'",
+        "DELETE FROM threads WHERE project = :p AND thread_id = 'T-a'",
+    ],
+}
 
 
-async def test_repeatable_read_close_after_a_newer_mark_fails_instead_of_leaving_it(
-    client: AsyncClient, session_factory: SessionFactory, rr_engine: AsyncEngine
+async def _end_thread_in(conn: Any, op: str) -> None:
+    for sql in _END_STATEMENTS[op]:
+        await conn.execute(text(sql), {"p": P})
+
+
+@pytest.mark.parametrize("op", ["resolve", "delete"])
+@pytest.mark.parametrize("row_before_snapshot", [False, True], ids=["row-absent", "row-present"])
+@pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE"])
+async def test_ending_a_thread_above_read_committed_is_refused_and_keeps_the_mark(
+    client: AsyncClient,
+    session_factory: SessionFactory,
+    database_url: str,
+    isolation: str,
+    row_before_snapshot: bool,
+    op: str,
 ) -> None:
-    """A REPEATABLE READ transaction takes its snapshot -> a PUT commits a
-    mark -> that transaction resolves the thread. The trigger's FOR UPDATE
-    meets a control row changed after the snapshot: serialization failure,
-    rollback. The thread stays open with its mark -- never resolved with a
-    mark silently left on it.
-
-    Precondition, deliberately set up: the control row already exists when
-    the snapshot is taken. A row created after the snapshot is invisible to
-    it, and FOR UPDATE then finds nothing to conflict with (recorded as a
-    known limit in the PR body; Conclair's own writes are READ COMMITTED).
-    """
+    """Snapshot -> a PUT commits a mark -> the snapshot's transaction ends
+    the thread. ``row-absent`` is the reproduction from the gate: the control
+    row did not exist at the snapshot, so a lookup would see nothing. Either
+    way the statement is refused, the transaction rolls back, and the thread
+    is still there and open with its mark -- never ended with the mark left
+    on it."""
     await _open(client, "T-a")
-    await _ensure_control_row(client)
+    if row_before_snapshot:
+        await _ensure_control_row(client)
 
-    async with rr_engine.connect() as conn:
-        trans = await conn.begin()
-        try:
-            # Take the snapshot now.
-            await conn.execute(text("SELECT count(*) FROM project_control"))
+    engine = create_async_engine(database_url, isolation_level=isolation)
+    try:
+        async with engine.connect() as conn:
+            trans = await conn.begin()
+            try:
+                # Take the snapshot now.
+                await conn.execute(text("SELECT count(*) FROM project_control"))
 
-            r = await client.put(
-                f"/v1/projects/{P}/control/summon",
-                json={"thread_id": "T-a", "by": "takahito"},
-            )
-            assert r.status_code == 200, r.text
-
-            with pytest.raises(DBAPIError) as raised:
-                await conn.execute(
-                    text(
-                        "UPDATE threads SET status = 'resolved' "
-                        "WHERE project = :p AND thread_id = 'T-a'"
-                    ),
-                    {"p": P},
+                r = await client.put(
+                    f"/v1/projects/{P}/control/summon",
+                    json={"thread_id": "T-a", "by": "takahito"},
                 )
-        finally:
-            await trans.rollback()
+                assert r.status_code == 200, r.text
 
-    assert "could not serialize access" in str(raised.value), raised.value
+                with pytest.raises(DBAPIError) as raised:
+                    await _end_thread_in(conn, op)
+            finally:
+                await trans.rollback()
+    finally:
+        await engine.dispose()
+
+    assert REFUSAL in str(raised.value), raised.value
     assert await _thread_status(session_factory, "T-a") == "active"
     mark = await _mark(session_factory)
     assert mark is not None and mark[0] == "T-a"
     assert await _history(session_factory) == [("set", "T-a", "takahito")]
+
+
+async def test_ending_a_thread_above_read_committed_is_refused_without_any_mark(
+    client: AsyncClient, session_factory: SessionFactory, database_url: str
+) -> None:
+    """The boundary is the isolation level, not the presence of a mark: the
+    function cannot know whether a mark it is unable to see exists."""
+    await _open(client, "T-a")
+
+    engine = create_async_engine(database_url, isolation_level="REPEATABLE READ")
+    try:
+        async with engine.connect() as conn:
+            trans = await conn.begin()
+            try:
+                with pytest.raises(DBAPIError) as raised:
+                    await _end_thread_in(conn, "resolve")
+            finally:
+                await trans.rollback()
+    finally:
+        await engine.dispose()
+
+    assert REFUSAL in str(raised.value), raised.value
+    assert await _thread_status(session_factory, "T-a") == "active"
+
+
+async def test_ending_a_thread_at_read_committed_in_raw_sql_still_clears(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    """The positive side of the boundary, outside the API: an explicit READ
+    COMMITTED transaction ends the thread and the mark goes with it."""
+    await _open(client, "T-a")
+    r = await client.put(
+        f"/v1/projects/{P}/control/summon", json={"thread_id": "T-a", "by": "takahito"}
+    )
+    assert r.status_code == 200, r.text
+
+    async with session_factory() as s:
+        await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        await _end_thread_in(s, "resolve")
+        await s.commit()
+
+    assert await _mark(session_factory) == (None, None, None)
+    assert await _history(session_factory) == [
+        ("set", "T-a", "takahito"),
+        ("clear", "T-a", "system:status:resolved"),
+    ]

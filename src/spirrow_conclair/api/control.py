@@ -283,10 +283,13 @@ async def get_control_history(
 # project's control-row lock, mark or no mark, so in one project thread
 # closes and HOLD / RESUME are serialized with each other.
 #
-# Isolation. These endpoints run at the session default (READ COMMITTED). A
-# caller at REPEATABLE READ or above whose trigger-driven clear meets a
-# concurrently changed control row gets a serialization failure and rolls
-# back; the mark is never silently left behind.
+# Isolation. These endpoints, and every Conclair write that ends a thread,
+# run at the session default (READ COMMITTED). The auto-clear is READ
+# COMMITTED only: ``clear_active_summon`` raises (SQLSTATE 0A000) at
+# REPEATABLE READ or above, because a control row a concurrent PUT created
+# after such a snapshot is invisible to its lookup and the mark would
+# outlive the thread. The raise rolls the ending transaction back, so the
+# mark is never silently left behind.
 
 
 def _refuse_blank(body: SummonRequest) -> None:

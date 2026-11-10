@@ -753,6 +753,13 @@ status 更新・DELETE の間ではロック順序が逆転しない。複数の
 トランザクション同士はデッドロックし得る (PG が片方を rollback し、印が中途半端に
 残ることはない)。
 
+**分離レベルの境界**: 自動解除は READ COMMITTED でだけ動く。REPEATABLE READ 以上の
+トランザクションで thread を開いた status の外へ移す、または DELETE すると、
+`clear_active_summon` が SQLSTATE `0A000` (feature_not_supported) で拒否し、その
+トランザクションは rollback される。snapshot より後に PUT が作った control 行は
+その snapshot から見えず、印を外せないまま thread だけが終わってしまうため。
+Conclair 自身の書き込みはすべて READ COMMITTED。
+
 **既知の特性**: thread を終了・削除するたびに、印の有無に関係なくその project の control 行に
 FOR UPDATE がかかる。同じ project 内の thread 終了操作と HOLD/RESUME は互いに直列になる。
 
