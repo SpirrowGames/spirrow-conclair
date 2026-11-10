@@ -253,36 +253,54 @@ def _call_sites() -> list[tuple[Path, list[_RowLockSite]]]:
     return hits
 
 
-def test_with_for_update_lives_at_exactly_one_call_site() -> None:
-    """Exactly one file, exactly one call -- inside ``post_message_in_session``.
+#: Every row-lock choke point in the tree: one file per locked table, and
+#: exactly one call in each. This is the explicit registry the old
+#: single-site assert asked for when a new lock became genuinely needed
+#: ("replace it with one that pins the new invariant explicitly").
+#:
+#: - ``api/messages.py`` -- ``threads``, inside ``post_message_in_session``
+#:   (the double-close race).
+#: - ``services/agent_session.py`` -- ``agent_sessions``, inside ``_locked``
+#:   (T45 PR1, msg-1320 §2: the PK UPSERT is decided after
+#:   ``SELECT ... FOR UPDATE``, for the same race on a different table).
+#:
+#: The two locks are on different tables, so neither covers the other, and a
+#: per-thread lock is still taken at exactly one site. Adding a third entry is
+#: a decision that belongs in review, not a line to append quietly.
+_EXPECTED_LOCK_SITES = {
+    ("api", "messages.py"),
+    ("services", "agent_session.py"),
+}
 
-    A second ``session.refresh(..., with_for_update=True)`` anywhere in the
-    tree would fail this test on purpose: the property being pinned is
-    "there is one row-lock call site", and one file listing two locks is one
-    call too many for a reviewer answering "where does the guarantee live?".
+
+def test_with_for_update_lives_at_exactly_one_call_site() -> None:
+    """Exactly one call per registered file, and no file outside the registry.
+
+    For ``threads`` this still means one site, inside
+    ``post_message_in_session``. A second ``session.refresh(...,
+    with_for_update=True)`` anywhere in the tree fails this test on purpose:
+    either it lands in an unregistered file, or it makes a registered file
+    hold two calls, which is one too many for a reviewer answering "where
+    does the guarantee live?".
     """
     hits = _call_sites()
 
-    found = [f"{p}: {[s.describe() for s in sites]}" for p, sites in hits]
-    assert len(hits) == 1, (
-        f"Expected a row lock to be taken in exactly one source file "
-        f"(``api/messages.py``); found it in {found}. "
-        f"If a new lock is genuinely needed, delete this test and replace it "
-        f"with one that pins the new invariant explicitly -- do not silently "
-        f"loosen the count."
+    found = {(p.parent.name, p.name) for p, _ in hits}
+    listing = [f"{p}: {[s.describe() for s in sites]}" for p, sites in hits]
+    assert found == _EXPECTED_LOCK_SITES, (
+        f"Expected row locks in exactly {sorted(_EXPECTED_LOCK_SITES)}; found "
+        f"them in {listing}. If a new lock is genuinely needed, add it to "
+        f"``_EXPECTED_LOCK_SITES`` with the table it locks and why -- do not "
+        f"silently loosen the count. If a choke point has moved, update the "
+        f"registry together with the move."
     )
-    path, sites = hits[0]
-    assert path.name == "messages.py" and path.parent.name == "api", (
-        f"Expected the row lock to live in ``api/messages.py``; found it in "
-        f"{path}. If the choke point has genuinely moved, update this test "
-        f"together with the move."
-    )
-    assert len(sites) == 1, (
-        f"Expected exactly one row-lock call in {path.name}, found "
-        f"{len(sites)}: {[s.describe(path) for s in sites]}. Two locks at the "
-        f"same site is one lock too many for a reader answering 'where is the "
-        f"guarantee?'."
-    )
+    for path, sites in hits:
+        assert len(sites) == 1, (
+            f"Expected exactly one row-lock call in {path.name}, found "
+            f"{len(sites)}: {[s.describe(path) for s in sites]}. Two locks at "
+            f"the same site is one lock too many for a reader answering 'where "
+            f"is the guarantee?'."
+        )
 
 
 def test_the_one_row_lock_call_asks_for_it_unconditionally() -> None:

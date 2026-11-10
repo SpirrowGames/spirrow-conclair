@@ -7,6 +7,7 @@ These map onto HTTP status codes in the FastAPI exception handlers
 |------------------------------|-----------|------------------------------------|
 | ChatroomNotFoundError        | 404       | thread / msg / project not found   |
 | ChatroomIntegrityError       | 409       | invariant violation                |
+| ChatroomSessionConflictError | 409       | agent_sessions write-once refusal  |
 | ChatroomPermissionError      | 403       | non-owner action attempted         |
 | ChatroomStateError           | 409       | invalid status transition          |
 | ChatroomThreadResolvedError  | 409       | write into a resolved thread       |
@@ -39,6 +40,26 @@ class ChatroomNotFoundError(ChatroomError):
 
 class ChatroomIntegrityError(ChatroomError):
     """Invariant violation (FK / unique / format / propose / closes_thread rule)."""
+
+
+class ChatroomSessionConflictError(ChatroomIntegrityError):
+    """A write to ``agent_sessions`` broke the write-once rules (D2' / D7).
+
+    This is a named subclass for the same reason as
+    ``ChatroomThreadResolvedError``: ``_payload`` emits
+    ``type(exc).__name__``, so the class name is the ``error_type`` on the
+    wire, and the MRO walk gives it the parent's 409 without a handler of its
+    own. Renaming the class is an API change, and
+    ``tests/unit/test_error_handlers.py`` pins the string.
+
+    ``details`` carries exactly ``{"field", "reason"}``, where ``reason`` is
+    one of ``immutable`` / ``already_set`` / ``session_id_mismatch``. It never
+    carries the stored value, and in particular never ``mindwire_session_id``,
+    which the board must not show. The final envelope is fixed in PR 2.
+    """
+
+    def __init__(self, message: str, *, field: str, reason: str) -> None:
+        super().__init__(message, details={"field": field, "reason": reason})
 
 
 class ChatroomUnprocessableError(ChatroomError):
