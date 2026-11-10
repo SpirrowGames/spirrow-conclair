@@ -1,5 +1,6 @@
 """FastAPI routers."""
 
+from spirrow_conclair.api.agent_sessions import router as agent_sessions_router
 from spirrow_conclair.api.control import router as control_router
 from spirrow_conclair.api.digest import router as digest_router
 from spirrow_conclair.api.events import router as events_router
@@ -10,6 +11,7 @@ from spirrow_conclair.api.read_cursor import router as read_cursor_router
 from spirrow_conclair.api.threads import router as threads_router
 
 __all__ = [
+    "agent_sessions_router",
     "control_router",
     "digest_router",
     "events_router",
