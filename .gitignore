@@ -45,3 +45,6 @@ logs/
 # Local data
 data/
 backups
+
+# Test fixtures are not local data (the Summon contract copy lives here).
+!tests/data/
