@@ -66,12 +66,22 @@ from spirrow_conclair.services.msg_id_allocator import format_msg_id, parse_msg_
 
 #: The one status this codebase treats as **terminal for writes**.
 #:
-#: ``superseded`` and ``parked`` are open questions with different reasoning
-#: (``parked`` has an active re-parenting workflow that writes to it;
-#: ``superseded`` has no ``resolved_by_msg`` and so no analogous R3 pairing) --
-#: see msg-406 §5.3. Naming exactly one status here rather than a set is
-#: deliberate: a set invites a later contributor to append to it without
-#: revisiting the reasoning either of those two would require.
+#: Whether ``superseded`` and ``parked`` are terminal for writes is undecided
+#: (msg-406 §5.3; ``superseded`` has no ``resolved_by_msg`` and so no
+#: analogous R3 pairing). Investigated 2026-11-10 (thread
+#: T-conclair-parked-superseded-write-terminality-undecided, msg-1611): no
+#: implementation path that sets either value was found in the three
+#: repositories examined (conclair ``36633eb`` / magickit ``5f615b1`` /
+#: mindwire ``03a66f0``), and the projects that could be enumerated held 0
+#: rows in either status. NOT verified: past use, manual SQL updates, and any
+#: project that could not be enumerated. That is a failure to find a writer,
+#: not proof that none exists. Decide write-terminality for these two values
+#: when a path that sets them (a PATCH endpoint or similar) is designed, as
+#: part of that design -- not here.
+#:
+#: Naming exactly one status here rather than a set is deliberate: a set
+#: invites a later contributor to append to it without revisiting the
+#: reasoning either of those two would require.
 _WRITE_TERMINAL_STATUS = "resolved"
 
 
