@@ -15,10 +15,12 @@ These map onto HTTP status codes in the FastAPI exception handlers
 | ChatroomSummonStateError     | 409       | summon_conflict / _mismatch / _thread_not_open |
 | ChatroomDBError              | 500       | unexpected DB-level failure        |
 
-Only the leaf classes above get an explicit handler. A subclass with no
-handler of its own is resolved by Starlette's MRO walk to its nearest
-registered ancestor, which is why ``ChatroomThreadResolvedError`` needs no
-entry in ``register_error_handlers`` to be a 409.
+Not every class above has its own handler: the set registered in
+``register_error_handlers`` (``api/error_handlers.py``) is authoritative.
+A subclass with no handler of its own is resolved by Starlette's MRO walk
+to its nearest registered ancestor, which is why
+``ChatroomThreadResolvedError`` needs no entry in
+``register_error_handlers`` to be a 409.
 """
 
 from __future__ import annotations
