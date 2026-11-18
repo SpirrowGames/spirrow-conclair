@@ -51,7 +51,9 @@ def _jsonable(value: Any) -> Any:
 
 def _payload(exc: ChatroomError, status: int) -> JSONResponse:
     body: dict[str, Any] = {
-        "error_type": type(exc).__name__,
+        # An explicit ``error_type`` (the Summon codes) wins over the class
+        # name; every other error keeps emitting its class name unchanged.
+        "error_type": exc.error_type or type(exc).__name__,
         "error": exc.message,
     }
     if exc.details:

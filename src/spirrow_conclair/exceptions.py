@@ -12,12 +12,16 @@ These map onto HTTP status codes in the FastAPI exception handlers
 | ChatroomStateError           | 409       | invalid status transition          |
 | ChatroomThreadResolvedError  | 409       | write into a resolved thread       |
 | ChatroomUnprocessableError   | 422       | request evidence fails a DB check  |
+| ChatroomInvalidArgumentError | 422       | blank Summon field (invalid_argument) |
+| ChatroomSummonStateError     | 409       | summon_conflict / _mismatch / _thread_not_open |
 | ChatroomDBError              | 500       | unexpected DB-level failure        |
 
-Only the leaf classes above get an explicit handler. A subclass with no
-handler of its own is resolved by Starlette's MRO walk to its nearest
-registered ancestor, which is why ``ChatroomThreadResolvedError`` needs no
-entry in ``register_error_handlers`` to be a 409.
+Not every class above has its own handler: the set registered in
+``register_error_handlers`` (``api/error_handlers.py``) is authoritative.
+A subclass with no handler of its own is resolved by Starlette's MRO walk
+to its nearest registered ancestor, which is why
+``ChatroomThreadResolvedError`` needs no entry in
+``register_error_handlers`` to be a 409.
 """
 
 from __future__ import annotations
@@ -26,7 +30,15 @@ from typing import Any
 
 
 class ChatroomError(Exception):
-    """Base for all spirrow-conclair domain errors."""
+    """Base for all spirrow-conclair domain errors.
+
+    ``error_type`` overrides the envelope's ``error_type`` string, which is
+    otherwise the class name (``api/error_handlers._payload``). Only the
+    Summon errors set it: their codes (``summon_conflict`` ...) are the wire
+    contract Magickit's summon tools were written against.
+    """
+
+    error_type: str | None = None
 
     def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
@@ -125,6 +137,34 @@ class ChatroomThreadResolvedError(ChatroomStateError):
     the class, because asserting the class alone would keep passing while the
     envelope drifted -- which is the exact failure this class exists to undo.
     """
+
+
+class ChatroomInvalidArgumentError(ChatroomUnprocessableError):
+    """A Summon request field is empty or whitespace-only (422).
+
+    Envelope: ``error_type = "invalid_argument"``, ``details = {"code":
+    "invalid_argument", "fields": [...]}`` -- the same shape Magickit's
+    summon tools produce when they refuse a blank field before calling here.
+    """
+
+    error_type = "invalid_argument"
+
+
+class ChatroomSummonStateError(ChatroomStateError):
+    """A Summon write refused by the current state (409).
+
+    ``code`` is one of ``summon_conflict`` / ``summon_mismatch`` /
+    ``summon_thread_not_open``. It becomes both the envelope's ``error_type``
+    and ``details.code``; ``details.active_summon`` carries the mark that is
+    currently held (``null`` when none), so a refused caller can see what
+    stopped it.
+    """
+
+    def __init__(
+        self, code: str, message: str, *, details: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(message, details={"code": code, **(details or {})})
+        self.error_type = code
 
 
 class ChatroomDBError(ChatroomError):

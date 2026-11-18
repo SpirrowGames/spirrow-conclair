@@ -1,4 +1,4 @@
-"""Migration round-trip for 0011_agent_sessions (T45 PR1, DoD).
+"""Migration round-trip for 0012_agent_sessions (T45 PR1, DoD).
 
 Same throw-away-database approach as ``test_migration_disposition``, and the
 scratch fixture is duplicated for the reason that file gives.
@@ -43,15 +43,19 @@ async def _scalar(url: str, statement: str, params: dict[str, str]) -> object:
         await engine.dispose()
 
 
-def _table_exists(url: str) -> bool:
+def _scalar_table_exists(url: str, table: str) -> bool:
     found = asyncio.run(
         _scalar(
             url,
             "SELECT 1 FROM information_schema.tables WHERE table_name = :t",
-            {"t": "agent_sessions"},
+            {"t": table},
         )
     )
     return found is not None
+
+
+def _table_exists(url: str) -> bool:
+    return _scalar_table_exists(url, "agent_sessions")
 
 
 def _constraint_exists(url: str, name: str) -> bool:
@@ -83,7 +87,7 @@ def scratch_url(database_url: str) -> Iterator[str]:
         asyncio.run(_exec_autocommit(database_url, f'DROP DATABASE IF EXISTS "{SCRATCH_DB}"'))
 
 
-def test_0011_upgrade_downgrade_upgrade(scratch_url: str) -> None:
+def test_0012_upgrade_downgrade_upgrade(scratch_url: str) -> None:
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", scratch_url)
 
@@ -94,11 +98,12 @@ def test_0011_upgrade_downgrade_upgrade(scratch_url: str) -> None:
     assert _index_exists(scratch_url, "idx_agent_sessions_identity")
     assert _index_exists(scratch_url, "idx_agent_sessions_project")
 
-    command.downgrade(cfg, "-1")
+    command.downgrade(cfg, "0011")
     assert not _table_exists(scratch_url)
     assert not _constraint_exists(scratch_url, LOOP_SESSION_ID_CHECK)
     assert not _index_exists(scratch_url, "idx_agent_sessions_identity")
-    # The previous revision is untouched.
+    # The previous revisions are untouched: 0011 (active_summon) and 0010.
+    assert _scalar_table_exists(scratch_url, "project_summon_history")
     assert _constraint_exists(scratch_url, "messages_disposition_shape_check")
 
     command.upgrade(cfg, "head")
@@ -106,7 +111,7 @@ def test_0011_upgrade_downgrade_upgrade(scratch_url: str) -> None:
     assert _constraint_exists(scratch_url, LOOP_SESSION_ID_CHECK)
 
 
-def test_0011_refuses_a_loop_row_without_session_id(scratch_url: str) -> None:
+def test_0012_refuses_a_loop_row_without_session_id(scratch_url: str) -> None:
     """msg-1322: a loop row stored with NULL would make NULL "match" NULL."""
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", scratch_url)

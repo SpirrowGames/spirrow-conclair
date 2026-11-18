@@ -16,6 +16,7 @@ from spirrow_conclair.models.message import Message  # noqa: E402, F401
 from spirrow_conclair.models.project_control import (  # noqa: E402, F401
     ProjectControl,
     ProjectControlHistory,
+    ProjectSummonHistory,
 )
 from spirrow_conclair.models.read_cursor import ActorReadCursor  # noqa: E402, F401
 from spirrow_conclair.models.thread import Thread  # noqa: E402, F401
@@ -30,4 +31,5 @@ __all__ = [
     "ThreadDigest",
     "ProjectControl",
     "ProjectControlHistory",
+    "ProjectSummonHistory",
 ]

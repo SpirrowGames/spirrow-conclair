@@ -205,6 +205,12 @@ closed thread (resolved/superseded/parked) に decide+closes_thread を投げる
 
 `superseded` / `parked` への遷移 API は v0.2 でも提供されない (運用上稀、必要時に PATCH endpoint 追加予定)。
 
+> **実装状況の注記 (2026-11-10 調査、thread `T-conclair-parked-superseded-write-terminality-undecided` msg-1611)**: 調査した 3 リポジトリ (conclair `36633eb` / magickit `5f615b1` / mindwire `03a66f0`) では、`superseded` / `parked` を設定する実装経路を確認できなかった。取得できた project では該当行は 0 件。過去の利用、手動 SQL による更新、列挙できなかった project は未確認。上の 5 値とその意味は変更しない。
+>
+> 遷移経路 (PATCH 等) を設計するときに決める事項:
+> - `superseded` への投稿の扱いが Web UI と API で異なる: Web UI は `superseded` の thread に投稿フォームを表示しない (`templates/thread_detail.html` の `is_open`)。API は投稿を受け付ける (`assert_thread_writable` が拒否するのは `resolved` のみ)。
+> - `superseded` / `parked` を書き込みに対して terminal とするかどうか。
+
 ---
 
 ## 7. Thread lifecycle
@@ -241,6 +247,8 @@ v0.1 では「summary 以外の msg を `archive/T-XXX.md` に move」する物�
 
 - closed thread を再開したい場合は **新しい thread を立てる** (`T-XXX-v2` 等)
 - 元 thread の status は `superseded` に変更すべき (v0.2 では PATCH API なし、SQL で直接更新するか v3 で API 追加)
+
+> **注記 (2026-11-10)**: この手順に沿って `resolved` の thread を SQL で `superseded` に書き換えると、`resolved_by_msg` が残ったままになるため、integrity 監査 (`services/integrity.py` の `inconsistent_resolved`: status が `resolved` 以外なのに `resolved_by_msg` が入っている) に検出される。また、SQL による書き換えは監査 event (`api/messages.py` が記録する `status_transition`) を通らないため、`chatroom_list_events` に残らない。この手順をどう変えるかは、遷移経路を設計するときに決める。
 
 ---
 

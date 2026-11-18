@@ -4,6 +4,8 @@ GET  /v1/projects/{project}/control           — current desired + observed
 PUT  /v1/projects/{project}/control           — set desired  (operators)
 POST /v1/projects/{project}/control/observed  — report observed (the loop)
 GET  /v1/projects/{project}/control/history   — recent desired changes
+PUT  /v1/projects/{project}/control/summon    — set the Summon (operators)
+POST /v1/projects/{project}/control/summon/clear — compare-and-clear it
 
 Two rules shape this module:
 
@@ -22,21 +24,36 @@ Two rules shape this module:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Path, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from spirrow_conclair.db import SessionDep
-from spirrow_conclair.models import ProjectControl, ProjectControlHistory
-from spirrow_conclair.models.project_control import DEFAULT_CONTROL_STATE
+from spirrow_conclair.exceptions import (
+    ChatroomInvalidArgumentError,
+    ChatroomNotFoundError,
+    ChatroomSummonStateError,
+)
+from spirrow_conclair.models import (
+    ProjectControl,
+    ProjectControlHistory,
+    ProjectSummonHistory,
+    Thread,
+)
+from spirrow_conclair.models.project_control import (
+    DEFAULT_CONTROL_STATE,
+    SUMMON_OPEN_STATUSES,
+)
 from spirrow_conclair.schemas import (
+    ActiveSummon,
     ControlHistoryItem,
     ControlHistoryListResponse,
     ControlStateResponse,
     ReportObservedRequest,
     SetControlRequest,
+    SummonRequest,
 )
 
 router = APIRouter(prefix="/v1/projects/{project}/control", tags=["control"])
@@ -64,6 +81,18 @@ def _to_response(project: str, row: ProjectControl | None) -> ControlStateRespon
         observed_actor=row.observed_actor if row else None,
         observed_at=row.observed_at if row else None,
         configured=configured,
+        active_summon=_summon_of(row),
+    )
+
+
+def _summon_of(row: ProjectControl | None) -> ActiveSummon | None:
+    """The row's Summon, or None. The CHECK makes the three columns all-or-none."""
+    if row is None or row.active_summon_thread_id is None:
+        return None
+    return ActiveSummon(
+        thread_id=row.active_summon_thread_id,
+        since=row.active_summon_since,  # type: ignore[arg-type]
+        by=row.active_summon_by,  # type: ignore[arg-type]
     )
 
 
@@ -231,3 +260,188 @@ async def get_control_history(
         total=total,
         limit=limit,
     )
+
+
+# --- Summon ---------------------------------------------------------------
+#
+# Spec: spirrow-magickit T-human-call-summon-server-side msg-1435 (v1.2 §1),
+# msg-1437 (v1.2.1), msg-1439 (v1.2.2), as applied to this repo in
+# T-conclair-active-summon (Bohr r1 msg-004 + r2 msg-006).
+#
+# Lock order. PUT locks the thread row (FOR SHARE), then the project's
+# control row (FOR UPDATE). The triggers on ``threads`` run while the status
+# UPDATE / DELETE holds that thread row, and ``clear_active_summon`` then
+# takes the control row FOR UPDATE: the same thread -> control order. So a
+# PUT and a status change / DELETE of the SAME thread cannot invert lock
+# order. That is the whole claim. A transaction that ends several threads
+# can still deadlock with another doing the same in another order (tx1 ends
+# A and takes control; tx2, holding B, waits on control; tx1 then updates
+# B). PostgreSQL's deadlock detector rolls one back, so no half-applied mark
+# survives; no retry machinery is added for it.
+#
+# Known property (msg-1440): ending or deleting ANY thread takes its
+# project's control-row lock, mark or no mark, so in one project thread
+# closes and HOLD / RESUME are serialized with each other.
+#
+# Isolation. These endpoints, and every Conclair write that ends a thread,
+# run at the session default (READ COMMITTED). The auto-clear is READ
+# COMMITTED only: ``clear_active_summon`` raises (SQLSTATE 0A000) at
+# REPEATABLE READ or above, because a control row a concurrent PUT created
+# after such a snapshot is invisible to its lookup and the mark would
+# outlive the thread. The raise rolls the ending transaction back, so the
+# mark is never silently left behind.
+
+
+def _refuse_blank(body: SummonRequest) -> None:
+    blank = [
+        name
+        for name, value in (("thread_id", body.thread_id), ("by", body.by))
+        if not value.strip()
+    ]
+    if blank:
+        raise ChatroomInvalidArgumentError(
+            f"{', '.join(blank)} must be a non-blank string",
+            details={"code": "invalid_argument", "fields": blank},
+        )
+
+
+async def _lock_control(session: SessionDep, project: str) -> ProjectControl | None:
+    """SELECT the control row FOR UPDATE, refreshing any cached instance."""
+    return await session.scalar(
+        select(ProjectControl)
+        .where(ProjectControl.project == project)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _summon_details(row: ProjectControl | None) -> dict[str, Any]:
+    current = _summon_of(row)
+    return {"active_summon": current.model_dump(mode="json") if current else None}
+
+
+@router.put(
+    "/summon",
+    response_model=ControlStateResponse,
+    summary="Mark a thread as the project's active Summon (operator action)",
+)
+async def set_summon(
+    project: ProjectPath,
+    body: SummonRequest,
+    session: SessionDep,
+) -> ControlStateResponse:
+    _refuse_blank(body)
+    now = datetime.now(timezone.utc)
+
+    async with session.begin():
+        # 1. The thread, FOR SHARE. It must exist in THIS project (another
+        #    project's thread is simply not found) and must not change status
+        #    until we commit: a concurrent close blocks on this lock, then its
+        #    trigger sees our mark and clears it. Checked before any INSERT,
+        #    so a 404 never creates a control row.
+        thread = await session.scalar(
+            select(Thread)
+            .where(Thread.project == project, Thread.thread_id == body.thread_id)
+            .with_for_update(read=True)
+        )
+        if thread is None:
+            raise ChatroomNotFoundError(
+                f"thread {body.thread_id!r} not found in project {project!r}",
+                details={"project": project, "thread_id": body.thread_id},
+            )
+        if thread.status not in SUMMON_OPEN_STATUSES:
+            raise ChatroomSummonStateError(
+                "summon_thread_not_open",
+                f"thread {body.thread_id!r} is {thread.status!r}; a Summon needs "
+                f"one of {list(SUMMON_OPEN_STATUSES)}",
+                details={
+                    "thread_status": thread.status,
+                    **_summon_details(await _fetch(session, project)),
+                },
+            )
+
+        # 2. The control row: created empty if absent (desired / observed stay
+        #    NULL, so the project stays "unconfigured"), then FOR UPDATE.
+        await session.execute(
+            pg_insert(ProjectControl)
+            .values(project=project)
+            .on_conflict_do_nothing(index_elements=[ProjectControl.project])
+        )
+        row = await _lock_control(session, project)
+        assert row is not None  # inserted or already there, and now locked
+
+        current = row.active_summon_thread_id
+        if current == body.thread_id:
+            pass  # idempotent: since, by and history stay as first written
+        elif current is not None:
+            raise ChatroomSummonStateError(
+                "summon_conflict",
+                f"project {project!r} already has a Summon on {current!r}; "
+                "clear it first",
+                details=_summon_details(row),
+            )
+        else:
+            row.active_summon_thread_id = body.thread_id
+            row.active_summon_since = now
+            row.active_summon_by = body.by
+            session.add(
+                ProjectSummonHistory(
+                    project=project,
+                    action="set",
+                    thread_id=body.thread_id,
+                    actor=body.by,
+                    changed_at=now,
+                    note=body.note or None,
+                )
+            )
+            await session.flush()
+
+    return _to_response(project, row)
+
+
+@router.post(
+    "/summon/clear",
+    status_code=status.HTTP_200_OK,
+    response_model=ControlStateResponse,
+    summary="Compare-and-clear the project's Summon (operator action)",
+)
+async def clear_summon(
+    project: ProjectPath,
+    body: SummonRequest,
+    session: SessionDep,
+) -> ControlStateResponse:
+    _refuse_blank(body)
+    now = datetime.now(timezone.utc)
+
+    async with session.begin():
+        # No INSERT: clearing nothing must not create a row.
+        row = await _lock_control(session, project)
+        current = row.active_summon_thread_id if row is not None else None
+        if current is None:
+            pass  # no mark: a 200 no-op, nothing written
+        elif current != body.thread_id:
+            # A stale screen must not erase a newer mark.
+            raise ChatroomSummonStateError(
+                "summon_mismatch",
+                f"the Summon is on {current!r}, not {body.thread_id!r}; "
+                "nothing was cleared",
+                details=_summon_details(row),
+            )
+        else:
+            assert row is not None
+            row.active_summon_thread_id = None
+            row.active_summon_since = None
+            row.active_summon_by = None
+            session.add(
+                ProjectSummonHistory(
+                    project=project,
+                    action="clear",
+                    thread_id=body.thread_id,
+                    actor=body.by,
+                    changed_at=now,
+                    note=body.note or None,
+                )
+            )
+            await session.flush()
+
+    return _to_response(project, row)
