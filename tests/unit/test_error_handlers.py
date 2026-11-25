@@ -193,3 +193,71 @@ def test_409_comes_from_the_parent_handler_not_a_new_one(
     assert ChatroomThreadResolvedError not in envelope_app.exception_handlers
     assert ChatroomStateError in envelope_app.exception_handlers
     assert probe.get("/probe").status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# The agent_sessions write-once refusal's wire form (T45 PR1).
+#
+# Same shape of contract as above: Magickit's `session_declare` (PR 2) will
+# classify the refusal by `error_type`, so the string is pinned as a string.
+# The refusal is raised by the real `plan_declare`, not constructed inline.
+# ---------------------------------------------------------------------------
+
+SESSION_SECRET = "mw-session-7f3a"
+
+
+@pytest.fixture
+def session_probe() -> TestClient:
+    from datetime import datetime, timezone
+
+    from spirrow_conclair.models import AgentSession
+    from spirrow_conclair.schemas.agent_session import DeclareAgentSessionRequest
+    from spirrow_conclair.services.agent_session import plan_declare
+
+    now = datetime(2026, 11, 10, tzinfo=timezone.utc)
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/probe")
+    def _probe() -> None:
+        row = AgentSession(
+            cc_session_uuid="u-1",
+            project="p",
+            source="loop",
+            mindwire_session_id=SESSION_SECRET,
+            started_at=now,
+            last_declared_at=now,
+        )
+        plan_declare(
+            row,
+            DeclareAgentSessionRequest(
+                kind="declare", project="p", source="loop", mindwire_session_id="wrong"
+            ),
+            now,
+        )
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_session_conflict_is_409_from_the_parent_handler(session_probe: TestClient) -> None:
+    from spirrow_conclair.exceptions import (
+        ChatroomIntegrityError,
+        ChatroomSessionConflictError,
+    )
+
+    assert issubclass(ChatroomSessionConflictError, ChatroomIntegrityError)
+    assert ChatroomSessionConflictError not in session_probe.app.exception_handlers
+    assert session_probe.get("/probe").status_code == 409
+
+
+def test_session_conflict_error_type_string_is_exact(session_probe: TestClient) -> None:
+    res = session_probe.get("/probe")
+    body = res.json()
+
+    assert body["error_type"] == "ChatroomSessionConflictError"
+    # Exactly field + reason, and never the stored value.
+    assert body["details"] == {
+        "field": "mindwire_session_id",
+        "reason": "session_id_mismatch",
+    }
+    assert SESSION_SECRET not in res.text

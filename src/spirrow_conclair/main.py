@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from spirrow_conclair import __version__
 from spirrow_conclair.api import (
+    agent_sessions_router,
     control_router,
     digest_router,
     events_router,
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(projects_router)
     app.include_router(control_router)
     app.include_router(digest_router)
+    app.include_router(agent_sessions_router)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
