@@ -54,7 +54,10 @@ docker exec -e PGPASSWORD="$PG_PASS" infra-postgres \
 # meaningful conversation content).
 chmod 600 "$OUT"
 
-# Retention pruning.
-find "$BACKUP_DIR" -maxdepth 1 -name 'conclair-*.dump.gz' -mtime +"$RETENTION_DAYS" -delete
+# Retention pruning. The trailing slash matters: on a deployed host the
+# default BACKUP_DIR is a symlink (backups -> ../shared/backups), and find
+# does not descend into a symlinked starting point, so without the slash
+# nothing was ever pruned.
+find "$BACKUP_DIR/" -maxdepth 1 -name 'conclair-*.dump.gz' -mtime +"$RETENTION_DAYS" -delete
 
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) backup ok: $OUT ($(stat -c%s "$OUT") bytes)"
